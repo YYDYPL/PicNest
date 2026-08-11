@@ -1,0 +1,62 @@
+[package]
+name = "picnest"
+version = "0.1.0"
+description = "A local-first photo inbox and organizer"
+authors = ["PicNest contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "picnest_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+base64 = "0.22"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+infer = "0.19"
+kamadak-exif = "0.6"
+keyring = { version = "3", features = ["windows-native"] }
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["backup", "bundled", "chrono", "functions"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
+thiserror = "2"
+trash = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+fs2 = "0.4"
+notify = "8"
+
+[dependencies.image]
+version = "0.25"
+default-features = false
+features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"]
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+  "Foundation",
+  "Globalization",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Storage",
+  "Storage_Streams",
+]
+
+[dev-dependencies]
+tempfile = "3"

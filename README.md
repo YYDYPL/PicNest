@@ -1,0 +1,63 @@
+# PicNest
+
+PicNest 是一个 Windows 优先、本地优先的照片收件箱与整理工具。原图始终保存在用户选择的本地目录中，应用只保存索引、缩略图、分析结果和可撤销的操作记录。
+
+## 当前公开测试版
+
+- 首次启动时选择图库目录与扫描来源
+- 扫描 JPEG、PNG、WebP、GIF、BMP、TIFF、HEIC 和 HEIF 文件
+- 提取尺寸、EXIF、拍摄时间、相机与 GPS 信息
+- 生成 WebP 缩略图，不在时间轴中直接解码大图
+- 使用 BLAKE3 检测完全重复图片，并生成 dHash 供相似图片能力使用
+- 提供待整理、全部图片、最近导入、相册、收藏、重复项、缺失文件与整理记录视图
+- 实时监听已选来源目录，新图片出现后通过应用内事件提醒并支持增量扫描
+- 使用 SQLite FTS5 与 BM25 排名搜索文件名、路径、OCR、标签、AI 描述、日期、相机和位置
+- 整理前预览目标路径；同盘移动、跨盘复制校验、冲突改名、撤销与中断恢复
+- 使用 Windows OCR 识别中英文截图文字
+- 用户主动触发后调用 OpenAI 兼容的视觉接口；上传的是最长边 1600px、已移除 EXIF 的重新编码预览图
+- API Key 保存到 Windows Credential Manager，不写入数据库、配置文件或日志
+- 支持批量加入相册、重复副本清理、AI 连接测试、删除密钥与清除 AI 结果
+- 支持导出脱敏诊断包，不包含本地路径、密钥与图片内容
+
+## 数据安全
+
+PicNest 不提供云同步或照片备份。整理操作永不覆盖已有文件，跨盘移动会先复制到临时文件并校验内容，确认成功后才删除来源文件。重复项删除进入系统回收站。
+
+建议在公开测试期间继续保留独立备份。照片管理器可以帮助整理文件，但不能替代备份工具。
+
+## 本地开发
+
+环境要求：Node.js、Rust stable、Windows WebView2，以及 Tauri 2 在 Windows 上所需的构建工具。
+
+```powershell
+npm install
+npm run desktop:dev
+```
+
+浏览器演示模式：
+
+```powershell
+npm run dev
+```
+
+浏览器模式使用内置演示数据，不会读取本地照片。
+
+## 检查与打包
+
+```powershell
+npm run lint
+npm test
+npm run build
+cd src-tauri
+cargo test
+cd ..
+npm run desktop:build
+```
+
+NSIS 安装包输出到 `src-tauri/target/release/bundle/nsis/`。
+
+## 测试版边界
+
+当前版本尚未包含向量语义索引/HNSW、地图浏览、人脸聚类、本地模型包、完整英文界面和签名自动更新。HEIC/HEIF 可以进入索引，但缩略图解码取决于当前系统与图像解码支持。
+
+自动更新产物暂时关闭。正式发布前需要配置真实的更新地址、签名私钥与内置公钥，不能使用占位密钥。

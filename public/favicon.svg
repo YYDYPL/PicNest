@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="PicNest">
+  <rect width="512" height="512" rx="72" fill="#202a2b"/>
+  <path d="M104 354V248c0-18 14-32 32-32h56v138H104Z" fill="#eef4f1"/>
+  <path d="M210 354V132c0-18 14-32 32-32h56v254h-88Z" fill="#eef4f1"/>
+  <path d="M316 354V190c0-18 14-32 32-32h60v196h-92Z" fill="#eef4f1"/>
+  <path d="M96 390h320" stroke="#5d9a84" stroke-width="28" stroke-linecap="round"/>
+</svg>

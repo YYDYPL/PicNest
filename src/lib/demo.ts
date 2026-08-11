@@ -72,11 +72,12 @@ export const demoAssets: Asset[] = Array.from({ length: 36 }, (_, index) => {
   const capturedAt = new Date(Date.UTC(2026, 7, 11 - dayOffset, 8 + (index % 9), 12))
   const category = categories[sample]
   const filename = index < 12 ? names[sample] : names[sample].replace('.', `_${index}.`)
+  const basePath = category === 'camera' ? 'D:\\DCIM' : category === 'wechat' ? 'C:\\Users\\me\\Desktop\\WeChat Images' : 'C:\\Users\\me\\Desktop'
 
   return {
     id: index + 1,
     filename,
-    path: `${category === 'camera' ? 'D:\\DCIM' : 'C:\\Users\\me\\Desktop'}\\${filename}`,
+    path: `${basePath}\\${filename}`,
     thumbnailDataUrl: null,
     width: category === 'screenshot' || category === 'document' ? 2560 : 4032,
     height: category === 'screenshot' || category === 'document' ? 1440 : 3024,
@@ -108,7 +109,12 @@ export const demoAssets: Asset[] = Array.from({ length: 36 }, (_, index) => {
 export const demoSettings: AppSettings = {
   configured: true,
   libraryPath: 'C:\\Users\\me\\Pictures\\PicNest Library',
-  sourcePaths: ['C:\\Users\\me\\Desktop', 'C:\\Users\\me\\Downloads'],
+  sourcePaths: ['C:\\Users\\me\\Desktop', 'C:\\Users\\me\\Desktop\\WeChat Images', 'C:\\Users\\me\\Downloads'],
+  sourceRecursive: {
+    'C:\\Users\\me\\Desktop': true,
+    'C:\\Users\\me\\Desktop\\WeChat Images': true,
+    'C:\\Users\\me\\Downloads': true,
+  },
   locale: 'zh-CN',
   cloudAiEnabled: false,
   aiBaseUrl: 'https://api.openai.com/v1',

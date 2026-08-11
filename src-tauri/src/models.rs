@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6,6 +8,8 @@ pub struct AppSettings {
     pub configured: bool,
     pub library_path: String,
     pub source_paths: Vec<String>,
+    #[serde(default)]
+    pub source_recursive: HashMap<String, bool>,
     pub locale: String,
     pub cloud_ai_enabled: bool,
     pub ai_base_url: String,
@@ -23,6 +27,8 @@ pub struct SaveSettingsInput {
     pub configured: bool,
     pub library_path: String,
     pub source_paths: Vec<String>,
+    #[serde(default)]
+    pub source_recursive: HashMap<String, bool>,
     pub locale: String,
     pub cloud_ai_enabled: bool,
     pub ai_base_url: String,
@@ -37,10 +43,15 @@ pub struct SaveSettingsInput {
 
 impl From<SaveSettingsInput> for AppSettings {
     fn from(value: SaveSettingsInput) -> Self {
+        let mut source_recursive = value.source_recursive;
+        for path in &value.source_paths {
+            source_recursive.entry(path.clone()).or_insert(true);
+        }
         Self {
             configured: value.configured,
             library_path: value.library_path,
             source_paths: value.source_paths,
+            source_recursive,
             locale: value.locale,
             cloud_ai_enabled: value.cloud_ai_enabled,
             ai_base_url: value.ai_base_url,
@@ -216,6 +227,28 @@ pub struct ConnectionTestResult {
 pub struct DiagnosticsResult {
     pub path: String,
     pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSourcePreviewEntry {
+    pub monitored_count: usize,
+    pub index_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSourcePreview {
+    pub path: String,
+    pub current: RemoveSourcePreviewEntry,
+    pub with_subdirs: RemoveSourcePreviewEntry,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSourceResult {
+    pub removed_paths: Vec<String>,
+    pub removed_indexes: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -18,7 +19,7 @@ use crate::{
     models::{ActivityItem, Album, AppSettings, LibraryStats},
 };
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -88,10 +89,8 @@ impl AppState {
         let connection = self.connection()?;
         let settings = load_settings(&connection)?;
         let watcher = if settings.configured && !settings.source_paths.is_empty() {
-            Some(crate::watch::create_watcher(
-                self.clone(),
-                &settings.source_paths,
-            )?)
+            let rules = crate::sources::source_rules(&settings);
+            Some(crate::watch::create_watcher(self.clone(), &rules)?)
         } else {
             None
         };
@@ -114,7 +113,11 @@ fn hamming_hex(left: &str, right: &str) -> i64 {
     }
 }
 
-fn migrate(connection: &Connection, db_path: &Path, database_existed: bool) -> AppResult<()> {
+pub(crate) fn migrate(
+    connection: &Connection,
+    db_path: &Path,
+    database_existed: bool,
+) -> AppResult<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if database_existed && version < SCHEMA_VERSION {
         backup_database(connection, db_path)?;
@@ -131,6 +134,7 @@ fn migrate(connection: &Connection, db_path: &Path, database_existed: bool) -> A
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL UNIQUE,
             enabled INTEGER NOT NULL DEFAULT 1,
+            recursive INTEGER NOT NULL DEFAULT 1,
             added_at TEXT NOT NULL,
             last_scan_at TEXT
         );
@@ -288,6 +292,12 @@ fn migrate(connection: &Connection, db_path: &Path, database_existed: bool) -> A
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(connection, "asset_locations", "root_path", "TEXT")?;
+    ensure_column(
+        connection,
+        "source_roots",
+        "recursive",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
     connection.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_asset_locations_root ON asset_locations(root_path, last_seen_at);",
     )?;
@@ -310,7 +320,7 @@ fn migrate(connection: &Connection, db_path: &Path, database_existed: bool) -> A
                 albums,
                 tokenize = 'unicode61 remove_diacritics 2'
             );
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             "#,
         )?;
         backfill_perceptual_segments(connection)?;
@@ -406,6 +416,10 @@ pub fn default_settings() -> AppSettings {
     if let Some(downloads) = dirs::download_dir() {
         sources.push(downloads.to_string_lossy().to_string());
     }
+    let source_recursive = sources
+        .iter()
+        .map(|path| (path.clone(), true))
+        .collect::<HashMap<_, _>>();
     AppSettings {
         configured: false,
         library_path: pictures
@@ -413,6 +427,7 @@ pub fn default_settings() -> AppSettings {
             .to_string_lossy()
             .to_string(),
         source_paths: sources,
+        source_recursive,
         locale: "zh-CN".to_string(),
         cloud_ai_enabled: false,
         ai_base_url: "https://api.openai.com/v1".to_string(),
@@ -432,23 +447,39 @@ pub fn load_settings(connection: &Connection) -> AppResult<AppSettings> {
             |row| row.get(0),
         )
         .optional()?;
-    match value {
-        Some(value) => Ok(serde_json::from_str(&value)?),
-        None => Ok(default_settings()),
+    let mut settings = match value {
+        Some(value) => serde_json::from_str(&value)?,
+        None => default_settings(),
+    };
+    for path in &settings.source_paths {
+        settings
+            .source_recursive
+            .entry(path.clone())
+            .or_insert(true);
     }
+    Ok(settings)
 }
 
 pub fn store_settings(connection: &Connection, settings: &AppSettings) -> AppResult<()> {
+    let transaction = connection.unchecked_transaction()?;
+    write_settings(&transaction, settings)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub(crate) fn write_settings(connection: &Connection, settings: &AppSettings) -> AppResult<()> {
     connection.execute(
         "INSERT INTO app_settings(key, value, updated_at) VALUES ('settings', ?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         params![serde_json::to_string(settings)?, Utc::now().to_rfc3339()],
     )?;
+    connection.execute("UPDATE source_roots SET enabled = 0", [])?;
     for path in &settings.source_paths {
+        let recursive = settings.source_recursive.get(path).copied().unwrap_or(true);
         connection.execute(
-            "INSERT INTO source_roots(path, enabled, added_at) VALUES (?1, 1, ?2)
-             ON CONFLICT(path) DO UPDATE SET enabled = 1",
-            params![path, Utc::now().to_rfc3339()],
+            "INSERT INTO source_roots(path, enabled, recursive, added_at) VALUES (?1, 1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET enabled = 1, recursive = excluded.recursive",
+            params![path, recursive as i64, Utc::now().to_rfc3339()],
         )?;
     }
     Ok(())
@@ -643,6 +674,15 @@ mod tests {
             .expect("column list");
         assert!(columns.contains(&"modified_at".to_string()));
         assert!(columns.contains(&"root_path".to_string()));
+        let mut source_columns = connection
+            .prepare("PRAGMA table_info(source_roots)")
+            .expect("source table info");
+        let source_columns = source_columns
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("source columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("source column list");
+        assert!(source_columns.contains(&"recursive".to_string()));
         let search_exists: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'asset_search'",

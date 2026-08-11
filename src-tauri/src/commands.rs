@@ -16,9 +16,9 @@ use crate::{
     models::{
         AiAnalysis, AiConnectionInput, AppSettings, AssetLocation, AssetPage, AssetQuery,
         BootstrapPayload, ConnectionTestResult, DiagnosticsResult, OrganizePlan, OrganizeResult,
-        SaveSettingsInput, ScanResult,
+        RemoveSourcePreview, RemoveSourceResult, SaveSettingsInput, ScanResult,
     },
-    ocr, organize,
+    ocr, organize, sources,
 };
 
 async fn blocking<T, F>(operation: F) -> Result<T, String>
@@ -63,6 +63,25 @@ pub async fn scan_paths(
 ) -> Result<ScanResult, String> {
     let state = state.inner().clone();
     blocking(move || library::scan_paths(&state, &paths)).await
+}
+
+#[tauri::command]
+pub async fn preview_remove_source(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<RemoveSourcePreview, String> {
+    let state = state.inner().clone();
+    blocking(move || sources::preview_remove_source(&state, &path)).await
+}
+
+#[tauri::command]
+pub async fn remove_source(
+    state: State<'_, AppState>,
+    path: String,
+    include_subdirs: bool,
+) -> Result<RemoveSourceResult, String> {
+    let state = state.inner().clone();
+    blocking(move || sources::remove_source(&state, &path, include_subdirs)).await
 }
 
 #[tauri::command]

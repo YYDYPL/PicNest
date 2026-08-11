@@ -498,7 +498,21 @@
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .source-list { margin-top: 12px; }
 .source-list > span { display: block; margin-bottom: 6px; color: var(--text); font-size: 10px; font-weight: 650; }
-.source-list div { padding: 6px 9px; border-top: 1px solid var(--line); color: var(--text-muted); font-size: 10px; }
+.source-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 36px 30px; align-items: center; gap: 10px; min-height: 44px; padding: 6px 9px; }
+.source-path { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.source-scope-label { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.source-switch { flex: 0 0 auto; }
+.source-remove { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; }
+.source-remove:hover { color: var(--red); background: var(--red-soft); }
+.remove-source-body { padding-top: 8px; }
+.remove-source-path { margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--bg-subtle); font-size: 10px; word-break: break-all; }
+.remove-scope-options { display: grid; gap: 8px; }
+.remove-scope-option { display: block; width: 100%; padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: var(--bg-raised); text-align: left; }
+.remove-scope-option[data-active="true"] { border-color: var(--blue); background: var(--blue-soft); box-shadow: 0 0 0 1px var(--blue); }
+.remove-scope-option strong { display: block; font-size: 11px; }
+.remove-scope-option small { display: block; margin-top: 4px; color: var(--text-muted); font-size: 10px; }
+.danger-remove-button { border-color: var(--red); background: var(--red); }
+.danger-remove-button:hover:not(:disabled) { border-color: #943a34; background: #943a34; }
 .secret-input { display: flex; align-items: center; gap: 8px; height: 35px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--text-muted); background: var(--bg-raised); }
 .secret-input input { flex: 1; height: 31px; min-width: 0; padding: 0; border: 0; box-shadow: none; }
 .secret-input button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; color: var(--text-muted); background: transparent; }

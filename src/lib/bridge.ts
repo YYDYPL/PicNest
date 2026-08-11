@@ -22,6 +22,8 @@ import type {
   DiagnosticsResult,
   OrganizePlan,
   OrganizeResult,
+  RemoveSourcePreview,
+  RemoveSourceResult,
   SaveSettingsInput,
   ScanResult,
 } from './types'
@@ -66,6 +68,40 @@ function filterBrowserAssets(query: AssetQuery) {
     })
   }
   return [...items].sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))
+}
+
+function normalizedSourcePath(value: string): string {
+  return value.replace(/[\\/]+$/, '').toLocaleLowerCase()
+}
+
+function browserPathStartsWith(path: string, root: string): boolean {
+  const pathValue = normalizedSourcePath(path)
+  const rootValue = normalizedSourcePath(root)
+  return pathValue === rootValue || pathValue.startsWith(`${rootValue}\\`) || pathValue.startsWith(`${rootValue}/`)
+}
+
+function browserPathInScope(path: string, root: string, recursive: boolean): boolean {
+  if (!browserPathStartsWith(path, root)) return false
+  if (recursive) return true
+  const rootValue = normalizedSourcePath(root)
+  const rest = normalizedSourcePath(path).slice(rootValue.length).replace(/^[\\/]+/, '')
+  return Boolean(rest) && !rest.includes('\\') && !rest.includes('/')
+}
+
+function browserRemovedPaths(path: string, includeSubdirs: boolean): string[] {
+  return browserSettings.sourcePaths.filter((candidate) => {
+    if (normalizedSourcePath(candidate) === normalizedSourcePath(path)) return true
+    return includeSubdirs && browserPathStartsWith(candidate, path)
+  })
+}
+
+function browserIndexCount(removedPaths: string[]): number {
+  const remainingPaths = browserSettings.sourcePaths.filter((path) => !removedPaths.includes(path))
+  return browserAssets.filter((asset) => {
+    const removed = removedPaths.some((path) => browserPathInScope(asset.path, path, browserSettings.sourceRecursive?.[path] ?? true))
+    const remaining = remainingPaths.some((path) => browserPathInScope(asset.path, path, browserSettings.sourceRecursive?.[path] ?? true))
+    return removed && !remaining
+  }).length
 }
 
 export const bridge = {
@@ -121,6 +157,38 @@ export const bridge = {
   async cancelScan(): Promise<boolean> {
     if (isTauri()) return invoke('cancel_scan')
     return false
+  },
+
+  async previewRemoveSource(path: string): Promise<RemoveSourcePreview> {
+    if (isTauri()) return invoke('preview_remove_source', { path })
+    const current = browserRemovedPaths(path, false)
+    const withSubdirs = browserRemovedPaths(path, true)
+    return {
+      path,
+      current: { monitoredCount: current.length, indexCount: browserIndexCount(current) },
+      withSubdirs: { monitoredCount: withSubdirs.length, indexCount: browserIndexCount(withSubdirs) },
+    }
+  },
+
+  async removeSource(path: string, includeSubdirs: boolean): Promise<RemoveSourceResult> {
+    if (isTauri()) return invoke('remove_source', { path, includeSubdirs })
+    const removedPaths = browserRemovedPaths(path, includeSubdirs)
+    const removedIndexes = browserIndexCount(removedPaths)
+    const remainingPaths = browserSettings.sourcePaths.filter((candidate) => !removedPaths.includes(candidate))
+    const recursive = { ...(browserSettings.sourceRecursive ?? {}) }
+    browserSettings = {
+      ...browserSettings,
+      sourcePaths: remainingPaths,
+      sourceRecursive: Object.fromEntries(
+        Object.entries(browserSettings.sourceRecursive ?? {}).filter(([candidate]) => !removedPaths.includes(candidate)),
+      ),
+    }
+    browserAssets = browserAssets.filter((asset) => {
+      const removed = removedPaths.some((path) => browserPathInScope(asset.path, path, recursive[path] ?? true))
+      const remaining = remainingPaths.some((path) => browserPathInScope(asset.path, path, browserSettings.sourceRecursive?.[path] ?? true))
+      return !(removed && !remaining)
+    })
+    return { removedPaths, removedIndexes }
   },
 
   async getAssetThumbnail(assetId: number): Promise<string | null> {
@@ -309,7 +377,12 @@ export const bridge = {
 
   async saveSettings(settings: SaveSettingsInput): Promise<AppSettings> {
     if (isTauri()) return invoke('save_settings', { input: settings })
-    browserSettings = { ...settings, configured: true, apiKeyConfigured: Boolean(settings.apiKey) || settings.apiKeyConfigured }
+    browserSettings = {
+      ...settings,
+      configured: true,
+      apiKeyConfigured: Boolean(settings.apiKey) || settings.apiKeyConfigured,
+      sourceRecursive: settings.sourceRecursive ?? {},
+    }
     return browserSettings
   },
 

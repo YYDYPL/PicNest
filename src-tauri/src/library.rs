@@ -18,6 +18,7 @@ use crate::{
     db::{add_activity, load_settings, perceptual_segments, sync_search_row, AppState},
     error::{AppError, AppResult},
     models::{Asset, AssetPage, AssetQuery, ScanResult},
+    sources::{path_in_scope, source_rules},
 };
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -57,7 +58,12 @@ pub fn scan_paths(state: &AppState, paths: &[String]) -> AppResult<ScanResult> {
         }
         let scan_token = Utc::now().to_rfc3339();
 
-        for entry in WalkDir::new(&root).follow_links(false).into_iter() {
+        let recursive = settings
+            .source_recursive
+            .get(source)
+            .copied()
+            .unwrap_or(true);
+        for entry in source_walker(&root, recursive) {
             if state.scan_cancelled.load(Ordering::SeqCst) {
                 result.cancelled = true;
                 break;
@@ -126,12 +132,12 @@ pub fn scan_paths(state: &AppState, paths: &[String]) -> AppResult<ScanResult> {
             break;
         }
 
-        mark_unseen_under_root(&connection, &root, &scan_token)?;
+        mark_unseen_under_root(&connection, &root, &scan_token, recursive)?;
 
         connection.execute(
-            "INSERT INTO source_roots(path, enabled, added_at, last_scan_at) VALUES (?1, 1, ?2, ?2)
-             ON CONFLICT(path) DO UPDATE SET enabled = 1, last_scan_at = excluded.last_scan_at",
-            params![source, Utc::now().to_rfc3339()],
+            "INSERT INTO source_roots(path, enabled, recursive, added_at, last_scan_at) VALUES (?1, 1, ?2, ?3, ?3)
+             ON CONFLICT(path) DO UPDATE SET enabled = 1, recursive = excluded.recursive, last_scan_at = excluded.last_scan_at",
+            params![source, recursive as i64, Utc::now().to_rfc3339()],
         )?;
     }
 
@@ -358,10 +364,19 @@ fn is_supported_image(path: &Path) -> bool {
     }
 }
 
+fn source_walker(root: &Path, recursive: bool) -> walkdir::IntoIter {
+    let mut walker = WalkDir::new(root).follow_links(false);
+    if !recursive {
+        walker = walker.max_depth(1);
+    }
+    walker.into_iter()
+}
+
 fn mark_unseen_under_root(
     connection: &rusqlite::Connection,
     root: &Path,
     seen_at: &str,
+    recursive: bool,
 ) -> AppResult<()> {
     let mut statement = connection.prepare(
         "SELECT id, asset_id, path, last_seen_at FROM asset_locations WHERE available = 1",
@@ -380,7 +395,7 @@ fn mark_unseen_under_root(
 
     let mut affected = HashSet::new();
     for (location_id, asset_id, path, last_seen_at) in rows {
-        if last_seen_at != seen_at && path_starts_with(Path::new(&path), root) {
+        if last_seen_at != seen_at && path_in_scope(Path::new(&path), root, recursive) {
             connection.execute(
                 "UPDATE asset_locations SET available = 0 WHERE id = ?1",
                 params![location_id],
@@ -428,21 +443,32 @@ fn mark_missing_path(connection: &rusqlite::Connection, missing_path: &Path) -> 
 pub fn process_watcher_paths(state: &AppState, paths: &[PathBuf]) -> AppResult<()> {
     let connection = state.connection()?;
     let settings = load_settings(&connection)?;
+    let rules = source_rules(&settings);
     let mut candidates = HashSet::<PathBuf>::new();
 
     for path in paths {
         if !path.exists() {
-            mark_missing_path(&connection, path)?;
+            if rules
+                .iter()
+                .any(|rule| path_in_scope(path, Path::new(&rule.path), rule.recursive))
+            {
+                mark_missing_path(&connection, path)?;
+            }
             continue;
         }
         if path.is_dir() {
-            for entry in WalkDir::new(path)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
+            if let Some(rule) = rules
+                .iter()
+                .find(|rule| path_in_scope(path, Path::new(&rule.path), rule.recursive))
             {
-                candidates.insert(entry.into_path());
+                if rule.recursive {
+                    for entry in source_walker(path, true)
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.file_type().is_file())
+                    {
+                        candidates.insert(entry.into_path());
+                    }
+                }
             }
         } else {
             candidates.insert(path.clone());
@@ -453,14 +479,13 @@ pub fn process_watcher_paths(state: &AppState, paths: &[PathBuf]) -> AppResult<(
         if !has_supported_extension(&path) || !is_supported_image(&path) {
             continue;
         }
-        let Some(root) = settings
-            .source_paths
+        let Some(rule) = rules
             .iter()
-            .map(PathBuf::from)
-            .find(|root| path_starts_with(&path, root))
+            .find(|rule| path_in_scope(&path, Path::new(&rule.path), rule.recursive))
         else {
             continue;
         };
+        let root = Path::new(&rule.path);
         let stamp = match file_stamp(&path) {
             Ok(stamp) => stamp,
             Err(error) => {
@@ -472,7 +497,7 @@ pub fn process_watcher_paths(state: &AppState, paths: &[PathBuf]) -> AppResult<(
         if !refresh_unchanged_location(
             &connection,
             &path,
-            &root,
+            root,
             &settings.library_path,
             &seen_at,
             stamp,
@@ -481,7 +506,7 @@ pub fn process_watcher_paths(state: &AppState, paths: &[PathBuf]) -> AppResult<(
                 state,
                 &connection,
                 &path,
-                &root,
+                root,
                 &settings.library_path,
                 &seen_at,
                 stamp,
@@ -671,7 +696,7 @@ fn source_label(root: &Path, category: &str) -> String {
     }
 }
 
-fn path_starts_with(path: &Path, root: &Path) -> bool {
+pub(crate) fn path_starts_with(path: &Path, root: &Path) -> bool {
     let path = path.to_string_lossy().to_lowercase();
     let root = root
         .to_string_lossy()
@@ -1010,6 +1035,33 @@ mod tests {
             Path::new(r"D:\\Photos-old\\a.jpg"),
             Path::new(r"D:\\Photos")
         ));
+    }
+
+    #[test]
+    fn non_recursive_walker_only_visits_the_root_directory() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let root = directory.path().join("source");
+        fs::create_dir_all(root.join("sub")).expect("create subdirectory");
+        fs::write(root.join("top.jpg"), b"top").expect("write top photo");
+        fs::write(root.join("sub/deep.jpg"), b"deep").expect("write nested photo");
+
+        let top_only = source_walker(&root, false)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<Vec<_>>();
+        assert_eq!(top_only.len(), 1);
+        assert_eq!(
+            top_only[0].file_name().unwrap().to_string_lossy(),
+            "top.jpg"
+        );
+
+        let recursive = source_walker(&root, true)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<Vec<_>>();
+        assert_eq!(recursive.len(), 2);
     }
 
     #[test]

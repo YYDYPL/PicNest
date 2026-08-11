@@ -55,7 +55,7 @@ export interface Album {
 
 export interface ActivityItem {
   id: number
-  kind: 'scan' | 'organize' | 'undo' | 'ai'
+  kind: 'scan' | 'organize' | 'undo' | 'ai' | 'source'
   title: string
   detail: string
   createdAt: string
@@ -66,6 +66,7 @@ export interface AppSettings {
   configured: boolean
   libraryPath: string
   sourcePaths: string[]
+  sourceRecursive?: Record<string, boolean>
   locale: 'zh-CN' | 'en-US'
   cloudAiEnabled: boolean
   aiBaseUrl: string
@@ -197,4 +198,20 @@ export interface ConnectionTestResult {
 export interface DiagnosticsResult {
   path: string
   bytes: number
+}
+
+export interface RemoveSourcePreviewEntry {
+  monitoredCount: number
+  indexCount: number
+}
+
+export interface RemoveSourcePreview {
+  path: string
+  current: RemoveSourcePreviewEntry
+  withSubdirs: RemoveSourcePreviewEntry
+}
+
+export interface RemoveSourceResult {
+  removedPaths: string[]
+  removedIndexes: number
 }

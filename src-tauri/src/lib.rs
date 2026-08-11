@@ -7,6 +7,7 @@ mod library;
 mod models;
 mod ocr;
 mod organize;
+mod sources;
 mod watch;
 
 use db::AppState;
@@ -37,6 +38,8 @@ pub fn run() {
             commands::cancel_scan,
             commands::get_asset_thumbnail,
             commands::get_asset_preview,
+            commands::preview_remove_source,
+            commands::remove_source,
             commands::create_organize_plan,
             commands::apply_organize_plan,
             commands::undo_last_operation,

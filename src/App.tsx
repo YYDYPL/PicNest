@@ -2,7 +2,7 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { AlertCircle, CheckCircle2, Inbox, LoaderCircle, ScanSearch, Sparkles, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { AlbumPickerDialog, CreateAlbumDialog, OrganizeDialog, RecoveryDialog, SettingsDialog, TagDialog, ViewerDialog } from './components/Dialogs'
+import { AlbumPickerDialog, CreateAlbumDialog, OrganizeDialog, RecoveryDialog, RemoveSourceDialog, SettingsDialog, TagDialog, ViewerDialog } from './components/Dialogs'
 import { Inspector } from './components/Inspector'
 import { Onboarding } from './components/Onboarding'
 import { PhotoGrid } from './components/PhotoGrid'
@@ -22,6 +22,7 @@ import type {
   LibraryStats,
   OrganizePlan,
   RecoveryJob,
+  RemoveSourcePreview,
   SaveSettingsInput,
   ViewId,
 } from './lib/types'
@@ -83,6 +84,10 @@ export default function App() {
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionResult, setConnectionResult] = useState<ConnectionTestResult | null>(null)
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false)
+  const [removeSourceOpen, setRemoveSourceOpen] = useState(false)
+  const [removeSourcePath, setRemoveSourcePath] = useState<string | null>(null)
+  const [removeSourcePreview, setRemoveSourcePreview] = useState<RemoveSourcePreview | null>(null)
+  const [removingSource, setRemovingSource] = useState(false)
   const [showDemoBanner, setShowDemoBanner] = useState(true)
   const [canUndo, setCanUndo] = useState(false)
   const [toast, setToast] = useState<ToastState | null>(null)
@@ -216,7 +221,11 @@ export default function App() {
     setScanning(true)
     try {
       const nextSources = Array.from(new Set([...settings.sourcePaths, ...paths]))
-      await bridge.saveSettings({ ...settings, sourcePaths: nextSources })
+      const nextRecursive = {
+        ...(settings.sourceRecursive ?? {}),
+        ...Object.fromEntries(paths.map((path) => [path, true])),
+      }
+      await bridge.saveSettings({ ...settings, sourcePaths: nextSources, sourceRecursive: nextRecursive })
       const result = await bridge.scanPaths(paths)
       await reloadAll()
       notify(result.cancelled ? `扫描已停止，已保留 ${result.indexed} 张索引` : `已索引 ${result.indexed} 张图片，跳过 ${result.skipped} 张未变化文件`, result.cancelled ? 'info' : 'success')
@@ -225,6 +234,33 @@ export default function App() {
     } finally {
       setScanning(false)
       setBusyLabel(null)
+    }
+  }
+
+  const openRemoveSource = async (path: string) => {
+    setRemoveSourcePath(path)
+    setRemoveSourcePreview(null)
+    setRemoveSourceOpen(true)
+    try {
+      setRemoveSourcePreview(await bridge.previewRemoveSource(path))
+    } catch (error) {
+      setRemoveSourceOpen(false)
+      notify(error instanceof Error ? error.message : '无法读取移除预览', 'error')
+    }
+  }
+
+  const confirmRemoveSource = async (includeSubdirs: boolean) => {
+    if (!removeSourcePath) return
+    setRemovingSource(true)
+    try {
+      const result = await bridge.removeSource(removeSourcePath, includeSubdirs)
+      setRemoveSourceOpen(false)
+      await reloadAll()
+      notify(`已移除 ${result.removedPaths.length} 个监控目录，清理 ${result.removedIndexes} 条本地索引`, 'success')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '移除监控文件夹失败', 'error')
+    } finally {
+      setRemovingSource(false)
     }
   }
 
@@ -389,12 +425,21 @@ export default function App() {
   const saveSettings = async (input: SaveSettingsInput) => {
     setSavingSettings(true)
     try {
+      const previousRecursive = settings.sourceRecursive ?? {}
+      const changedSources = input.sourcePaths.filter((path) =>
+        (previousRecursive[path] ?? true) !== (input.sourceRecursive?.[path] ?? true),
+      )
       const saved = await bridge.saveSettings(input)
       setSettings(saved)
       setConnectionResult(null)
       setBoot((current) => current ? { ...current, settings: saved } : current)
       ui.setSettingsOpen(false)
-      notify('设置已保存', 'success')
+      if (changedSources.length) {
+        const result = await bridge.scanPaths(changedSources)
+        notify(`设置已保存，已重新扫描 ${changedSources.length} 个目录${result.cancelled ? '，扫描已停止' : ''}`, result.cancelled ? 'info' : 'success')
+      } else {
+        notify('设置已保存', 'success')
+      }
     } catch (error) {
       notify(error instanceof Error ? error.message : '设置保存失败', 'error')
     } finally {
@@ -596,7 +641,8 @@ export default function App() {
         {toast ? <div className="toast" data-tone={toast.tone}>{toast.tone === 'success' ? <CheckCircle2 size={17} /> : toast.tone === 'error' ? <AlertCircle size={17} /> : <ScanSearch size={17} />}<span>{toast.message}</span><button type="button" aria-label="关闭通知" onClick={() => setToast(null)}><X size={14} /></button></div> : null}
 
         <OrganizeDialog open={ui.organizeOpen} plan={organizePlan} applying={applying} onOpenChange={ui.setOrganizeOpen} onApply={applyPlan} />
-        <SettingsDialog open={ui.settingsOpen} settings={settings} saving={savingSettings} testingConnection={testingConnection} connectionResult={connectionResult} exportingDiagnostics={exportingDiagnostics} onOpenChange={ui.setSettingsOpen} onSave={saveSettings} onTestConnection={testAiConnection} onDeleteApiKey={deleteApiKey} onClearAiResults={clearAiResults} onExportDiagnostics={exportDiagnostics} />
+        <SettingsDialog open={ui.settingsOpen} settings={settings} saving={savingSettings} testingConnection={testingConnection} connectionResult={connectionResult} exportingDiagnostics={exportingDiagnostics} onOpenChange={ui.setSettingsOpen} onSave={saveSettings} onTestConnection={testAiConnection} onDeleteApiKey={deleteApiKey} onClearAiResults={clearAiResults} onExportDiagnostics={exportDiagnostics} onRemoveSource={openRemoveSource} />
+        <RemoveSourceDialog open={removeSourceOpen} path={removeSourcePath ?? ''} preview={removeSourcePreview} removing={removingSource} onOpenChange={setRemoveSourceOpen} onRemove={confirmRemoveSource} />
         <ViewerDialog open={ui.viewerOpen} asset={selectedAsset} hasPrevious={viewerIndex > 0} hasNext={viewerIndex >= 0 && viewerIndex < assets.length - 1} onOpenChange={ui.setViewerOpen} onPrevious={() => navigateViewer(-1)} onNext={() => navigateViewer(1)} />
         <CreateAlbumDialog open={albumDialogOpen} saving={savingAlbum} onOpenChange={setAlbumDialogOpen} onCreate={createAlbum} />
         <AlbumPickerDialog open={albumPickerOpen} albums={albums} count={dialogAssetIds.length} saving={savingAlbumAssignment} onOpenChange={setAlbumPickerOpen} onAssign={assignToAlbum} />

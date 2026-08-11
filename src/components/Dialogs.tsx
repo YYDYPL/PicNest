@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   FileDown,
+  FolderMinus,
   FolderPlus,
   KeyRound,
   LoaderCircle,
@@ -24,7 +25,7 @@ import {
 import { useEffect, useState } from 'react'
 import { formatBytes, formatDateTime } from '../lib/format'
 import { useAssetImage } from '../lib/images'
-import type { Album, AppSettings, Asset, ConnectionTestResult, OrganizePlan, RecoveryJob, SaveSettingsInput } from '../lib/types'
+import type { Album, AppSettings, Asset, ConnectionTestResult, OrganizePlan, RecoveryJob, RemoveSourcePreview, SaveSettingsInput } from '../lib/types'
 
 function CloseButton() {
   return (
@@ -83,13 +84,17 @@ export function OrganizeDialog({ open, plan, applying, onOpenChange, onApply }: 
   )
 }
 
-export function SettingsDialog({ open, settings, saving, testingConnection, connectionResult, exportingDiagnostics, onOpenChange, onSave, onTestConnection, onDeleteApiKey, onClearAiResults, onExportDiagnostics }: { open: boolean; settings: AppSettings; saving: boolean; testingConnection: boolean; connectionResult: ConnectionTestResult | null; exportingDiagnostics: boolean; onOpenChange: (open: boolean) => void; onSave: (input: SaveSettingsInput) => void; onTestConnection: (input: SaveSettingsInput) => void; onDeleteApiKey: () => void; onClearAiResults: () => void; onExportDiagnostics: () => void }) {
+export function SettingsDialog({ open, settings, saving, testingConnection, connectionResult, exportingDiagnostics, onOpenChange, onSave, onTestConnection, onDeleteApiKey, onClearAiResults, onExportDiagnostics, onRemoveSource }: { open: boolean; settings: AppSettings; saving: boolean; testingConnection: boolean; connectionResult: ConnectionTestResult | null; exportingDiagnostics: boolean; onOpenChange: (open: boolean) => void; onSave: (input: SaveSettingsInput) => void; onTestConnection: (input: SaveSettingsInput) => void; onDeleteApiKey: () => void; onClearAiResults: () => void; onExportDiagnostics: () => void; onRemoveSource: (path: string) => void }) {
   const [draft, setDraft] = useState<SaveSettingsInput>(settings)
   const [showKey, setShowKey] = useState(false)
 
-  useEffect(() => setDraft(settings), [settings, open])
+  useEffect(() => setDraft({ ...settings, sourceRecursive: settings.sourceRecursive ?? {} }), [settings, open])
 
   const update = <K extends keyof SaveSettingsInput,>(key: K, value: SaveSettingsInput[K]) => setDraft((current) => ({ ...current, [key]: value }))
+  const setSourceRecursive = (path: string, checked: boolean) => setDraft((current) => ({
+    ...current,
+    sourceRecursive: { ...(current.sourceRecursive ?? {}), [path]: checked },
+  }))
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -107,7 +112,21 @@ export function SettingsDialog({ open, settings, saving, testingConnection, conn
               <label className="field"><span>图库位置</span><input value={draft.libraryPath} onChange={(event) => update('libraryPath', event.target.value)} /></label>
               <div className="source-list">
                 <span>正在监控的文件夹</span>
-                {draft.sourcePaths.map((path) => <div key={path}>{path}</div>)}
+                {draft.sourcePaths.map((path) => (
+                  <div className="source-row" key={path}>
+                    <span className="source-path" title={path}>{path}</span>
+                    <span className="source-scope-label">包含子目录</span>
+                    <Switch.Root
+                      className="switch-root source-switch"
+                      checked={Boolean(draft.sourceRecursive?.[path] ?? true)}
+                      onCheckedChange={(checked) => setSourceRecursive(path, checked)}
+                      aria-label={`${path} 包含子目录`}
+                    >
+                      <Switch.Thumb className="switch-thumb" />
+                    </Switch.Root>
+                    <button className="source-remove" type="button" aria-label={`移除监控 ${path}`} onClick={() => onRemoveSource(path)}><Trash2 size={15} /></button>
+                  </div>
+                ))}
               </div>
             </section>
 
@@ -148,6 +167,48 @@ export function SettingsDialog({ open, settings, saving, testingConnection, conn
           <div className="dialog-actions">
             <Dialog.Close asChild><button className="secondary-button" type="button" disabled={saving}>取消</button></Dialog.Close>
             <button className="primary-button" type="button" onClick={() => onSave(draft)} disabled={saving || !draft.libraryPath.trim()}>{saving ? <LoaderCircle className="spin" size={16} /> : null}保存设置</button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+export function RemoveSourceDialog({ open, path, preview, removing, onOpenChange, onRemove }: { open: boolean; path: string; preview: RemoveSourcePreview | null; removing: boolean; onOpenChange: (open: boolean) => void; onRemove: (includeSubdirs: boolean) => void }) {
+  const [includeSubdirs, setIncludeSubdirs] = useState(false)
+  useEffect(() => {
+    if (open) setIncludeSubdirs(false)
+  }, [open, path])
+  const entry = includeSubdirs ? preview?.withSubdirs : preview?.current
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content compact-dialog">
+          <div className="dialog-header">
+            <div><Dialog.Title>移除监控文件夹</Dialog.Title><Dialog.Description>只删除本地索引，不删除原文件；已整理进图库的照片会保留。</Dialog.Description></div>
+            <CloseButton />
+          </div>
+          <div className="compact-dialog-body remove-source-body">
+            <p className="remove-source-path" title={path}>{path || '正在读取…'}</p>
+            <div className="remove-scope-options" role="radiogroup" aria-label="移除范围">
+              <button className="remove-scope-option" data-active={!includeSubdirs} type="button" onClick={() => setIncludeSubdirs(false)}>
+                <strong>仅移除当前目录</strong>
+                <small>{preview ? `${preview.current.monitoredCount} 个监控项 · ${preview.current.indexCount} 条本地索引` : '正在计算…'}</small>
+              </button>
+              <button className="remove-scope-option" data-active={includeSubdirs} type="button" onClick={() => setIncludeSubdirs(true)}>
+                <strong>连同子目录一起移除</strong>
+                <small>{preview ? `${preview.withSubdirs.monitoredCount} 个监控项 · ${preview.withSubdirs.indexCount} 条本地索引` : '正在计算…'}</small>
+              </button>
+            </div>
+            <div className="safety-note"><FolderMinus size={17} /><span>移除后原文件不会移动或删除，需要时仍可重新添加该文件夹。</span></div>
+          </div>
+          <div className="dialog-actions">
+            <Dialog.Close asChild><button className="secondary-button" type="button" disabled={removing}>取消</button></Dialog.Close>
+            <button className="primary-button danger-remove-button" type="button" disabled={removing || !preview} onClick={() => onRemove(includeSubdirs)}>
+              {removing ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={15} />}
+              {removing ? '正在清理索引…' : `移除${entry?.monitoredCount ? ` ${entry.monitoredCount} 个监控项` : ''}`}
+            </button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

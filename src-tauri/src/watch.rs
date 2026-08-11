@@ -8,9 +8,9 @@ use std::{
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::Emitter;
 
-use crate::{db::AppState, error::AppResult};
+use crate::{db::AppState, error::AppResult, sources::SourceRule};
 
-pub fn create_watcher(state: AppState, sources: &[String]) -> AppResult<RecommendedWatcher> {
+pub fn create_watcher(state: AppState, sources: &[SourceRule]) -> AppResult<RecommendedWatcher> {
     let (sender, receiver) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = RecommendedWatcher::new(
         move |event| {
@@ -20,9 +20,16 @@ pub fn create_watcher(state: AppState, sources: &[String]) -> AppResult<Recommen
     )?;
 
     for source in sources {
-        let path = Path::new(source);
+        let path = Path::new(&source.path);
         if path.is_dir() {
-            watcher.watch(path, RecursiveMode::Recursive)?;
+            watcher.watch(
+                path,
+                if source.recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                },
+            )?;
         }
     }
 

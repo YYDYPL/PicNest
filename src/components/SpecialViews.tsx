@@ -1,4 +1,4 @@
-import { Album, BrainCircuit, Clock3, Plus, Sparkles } from 'lucide-react'
+import { Album, BrainCircuit, Clock3, FolderMinus, Plus, Sparkles } from 'lucide-react'
 import { formatDateTime } from '../lib/format'
 import type { ActivityItem, Album as AlbumType } from '../lib/types'
 
@@ -25,7 +25,7 @@ export function ActivityView({ items }: { items: ActivityItem[] }) {
       <div className="activity-list">
         {items.map((item) => (
           <div className="activity-row" key={item.id}>
-            <span className="activity-icon">{item.kind === 'ai' ? <Sparkles size={17} /> : <Clock3 size={17} />}</span>
+            <span className="activity-icon">{item.kind === 'ai' ? <Sparkles size={17} /> : item.kind === 'source' ? <FolderMinus size={17} /> : <Clock3 size={17} />}</span>
             <div><strong>{item.title}</strong><p>{item.detail}</p></div>
             <time>{formatDateTime(item.createdAt)}</time>
             {item.reversible ? <span className="reversible">可撤销</span> : null}

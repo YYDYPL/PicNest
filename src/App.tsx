@@ -245,7 +245,7 @@ export default function App() {
       setRemoveSourcePreview(await bridge.previewRemoveSource(path))
     } catch (error) {
       setRemoveSourceOpen(false)
-      notify(error instanceof Error ? error.message : '无法读取移除预览', 'error')
+      notify(typeof error === 'string' ? error : error instanceof Error ? error.message : '无法读取移除预览', 'error')
     }
   }
 
@@ -258,7 +258,7 @@ export default function App() {
       await reloadAll()
       notify(`已移除 ${result.removedPaths.length} 个监控目录，清理 ${result.removedIndexes} 条本地索引`, 'success')
     } catch (error) {
-      notify(error instanceof Error ? error.message : '移除监控文件夹失败', 'error')
+      notify(typeof error === 'string' ? error : error instanceof Error ? error.message : '移除监控文件夹失败', 'error')
     } finally {
       setRemovingSource(false)
     }

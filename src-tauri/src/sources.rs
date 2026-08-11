@@ -168,11 +168,22 @@ fn remove_sources(
                 "DELETE FROM asset_search WHERE asset_id = ?1",
                 params![asset_id],
             )?;
+            transaction.execute(
+                "DELETE FROM organize_plan_items WHERE asset_id = ?1",
+                params![asset_id],
+            )?;
             transaction.execute("DELETE FROM assets WHERE id = ?1", params![asset_id])?;
         } else {
             sync_search_row(&transaction, asset_id)?;
         }
     }
+    transaction.execute(
+        "DELETE FROM organize_plans
+         WHERE NOT EXISTS (
+             SELECT 1 FROM organize_plan_items WHERE organize_plan_items.plan_id = organize_plans.id
+         )",
+        [],
+    )?;
 
     settings
         .source_paths
@@ -421,6 +432,22 @@ mod tests {
                 [],
             )
             .expect("insert search row");
+        connection
+            .execute(
+                "INSERT INTO organize_plans(id, status, total_bytes, created_at)
+                 VALUES ('plan-debug', 'planned', 2, '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("insert plan");
+        connection
+            .execute(
+                "INSERT INTO organize_plan_items(
+                    plan_id, asset_id, source_path, target_path, reason, bytes, conflict
+                 ) VALUES ('plan-debug', 1, 'D:\\src\\a.jpg', 'D:\\Library\\a.jpg', '测试', 1, 0),
+                 ('plan-debug', 2, 'D:\\Library\\2026\\08\\b.jpg', 'D:\\Library\\b.jpg', '测试', 1, 0)",
+                [],
+            )
+            .expect("insert plan items");
 
         let result = remove_sources(&connection, &mut settings, root, false).expect("remove");
         assert_eq!(result.removed_indexes, 1);
@@ -440,5 +467,15 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM asset_search", [], |row| row.get(0))
             .expect("count search rows");
         assert_eq!(remaining_search_rows, 0);
+        let remaining_plan_items: i64 = connection
+            .query_row("SELECT COUNT(*) FROM organize_plan_items", [], |row| {
+                row.get(0)
+            })
+            .expect("count plan items");
+        assert_eq!(remaining_plan_items, 1);
+        let remaining_plans: i64 = connection
+            .query_row("SELECT COUNT(*) FROM organize_plans", [], |row| row.get(0))
+            .expect("count plans");
+        assert_eq!(remaining_plans, 1);
     }
 }

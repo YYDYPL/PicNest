@@ -62,6 +62,91 @@ pub fn remove_source(
     Ok(result)
 }
 
+pub fn cleanup_stale_indexes(state: &AppState) -> AppResult<i64> {
+    let connection = state.connection()?;
+    let settings = load_settings(&connection)?;
+    cleanup_stale_indexes_with_settings(&connection, &settings)
+}
+
+fn cleanup_stale_indexes_with_settings(
+    connection: &Connection,
+    settings: &AppSettings,
+) -> AppResult<i64> {
+    let active_rules = source_rules(settings);
+    let library_root = Path::new(&settings.library_path);
+    let transaction = connection.unchecked_transaction()?;
+    let mut statement = transaction.prepare("SELECT id, asset_id, path FROM asset_locations")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut removed_indexes = 0_i64;
+    let mut affected_assets = HashSet::<i64>::new();
+    for (location_id, asset_id, location_path) in rows {
+        let path = Path::new(&location_path);
+        let protected = path_starts_with(path, library_root)
+            || active_rules
+                .iter()
+                .any(|rule| path_in_scope(path, Path::new(&rule.path), rule.recursive));
+        if !protected {
+            transaction.execute(
+                "DELETE FROM asset_locations WHERE id = ?1",
+                params![location_id],
+            )?;
+            removed_indexes += 1;
+            affected_assets.insert(asset_id);
+        }
+    }
+
+    for asset_id in affected_assets {
+        let remaining_locations: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM asset_locations WHERE asset_id = ?1",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+        if remaining_locations == 0 {
+            transaction.execute(
+                "DELETE FROM asset_search WHERE asset_id = ?1",
+                params![asset_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM organize_plan_items WHERE asset_id = ?1",
+                params![asset_id],
+            )?;
+            transaction.execute("DELETE FROM assets WHERE id = ?1", params![asset_id])?;
+        } else {
+            sync_search_row(&transaction, asset_id)?;
+        }
+    }
+    transaction.execute(
+        "DELETE FROM organize_plans
+         WHERE NOT EXISTS (
+             SELECT 1 FROM organize_plan_items WHERE organize_plan_items.plan_id = organize_plans.id
+         )",
+        [],
+    )?;
+
+    if removed_indexes > 0 {
+        add_activity(
+            &transaction,
+            "source",
+            "清理了失效的本地索引",
+            &format!("移除了 {removed_indexes} 条不再被任何监控文件夹覆盖的本地索引"),
+            false,
+            None,
+        )?;
+    }
+    transaction.commit()?;
+    Ok(removed_indexes)
+}
+
 fn preview_remove(
     connection: &Connection,
     settings: &AppSettings,
@@ -70,8 +155,8 @@ fn preview_remove(
     ensure_source_exists(settings, path)?;
     let current_paths = collect_removed_roots(settings, path, false);
     let with_subdirs = collect_removed_roots(settings, path, true);
-    let current = preview_entry(connection, settings, &current_paths)?;
-    let with_subdirs = preview_entry(connection, settings, &with_subdirs)?;
+    let current = preview_entry(connection, settings, &current_paths, false)?;
+    let with_subdirs = preview_entry(connection, settings, &with_subdirs, true)?;
     Ok(RemoveSourcePreview {
         path: path.to_string(),
         current,
@@ -83,8 +168,9 @@ fn preview_entry(
     connection: &Connection,
     settings: &AppSettings,
     removed_paths: &[String],
+    include_subdirs: bool,
 ) -> AppResult<RemoveSourcePreviewEntry> {
-    let removed_rules = rules_for_paths(settings, removed_paths);
+    let removed_rules = rules_for_removal(settings, removed_paths, include_subdirs);
     let removed_set = normalized_set(removed_paths);
     let remaining_paths = settings
         .source_paths
@@ -107,7 +193,7 @@ fn remove_sources(
 ) -> AppResult<RemoveSourceResult> {
     ensure_source_exists(settings, path)?;
     let removed_paths = collect_removed_roots(settings, path, include_subdirs);
-    let removed_rules = rules_for_paths(settings, &removed_paths);
+    let removed_rules = rules_for_removal(settings, &removed_paths, include_subdirs);
     let removed_set = normalized_set(&removed_paths);
     let remaining_paths = settings
         .source_paths
@@ -243,6 +329,20 @@ fn rules_for_paths(settings: &AppSettings, paths: &[String]) -> Vec<SourceRule> 
     source_rules(settings)
         .into_iter()
         .filter(|rule| set.contains(&normalized(&rule.path)))
+        .collect()
+}
+
+fn rules_for_removal(
+    settings: &AppSettings,
+    paths: &[String],
+    include_subdirs: bool,
+) -> Vec<SourceRule> {
+    rules_for_paths(settings, paths)
+        .into_iter()
+        .map(|rule| SourceRule {
+            path: rule.path,
+            recursive: include_subdirs || rule.recursive,
+        })
         .collect()
 }
 
@@ -395,6 +495,89 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM asset_locations", [], |row| row.get(0))
             .expect("count locations");
         assert_eq!(remaining_locations, 1);
+    }
+
+    #[test]
+    fn removal_with_subdirs_cleans_legacy_nested_indexes() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("picnest.db");
+        let connection = Connection::open(&path).expect("database");
+        crate::db::migrate(&connection, &path, false).expect("migrate");
+
+        let root = r"D:\src";
+        let mut settings = settings_with(root, r"D:\unused");
+        settings.source_paths = vec![root.to_string()];
+        settings.source_recursive.clear();
+        settings.source_recursive.insert(root.to_string(), false);
+        insert_asset(&connection, 1, "hash-1", r"D:\src\legacy\sub\a.jpg", root);
+
+        let preview = preview_remove(&connection, &settings, root).expect("preview");
+        assert_eq!(preview.current.index_count, 0);
+        assert_eq!(preview.with_subdirs.index_count, 1);
+
+        let result =
+            remove_sources(&connection, &mut settings, root, true).expect("remove with subdirs");
+        assert_eq!(result.removed_indexes, 1);
+        let remaining_assets: i64 = connection
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+            .expect("count assets");
+        assert_eq!(remaining_assets, 0);
+    }
+
+    #[test]
+    fn startup_cleanup_removes_stale_indexes_and_keeps_active_locations() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("picnest.db");
+        let connection = Connection::open(&path).expect("database");
+        crate::db::migrate(&connection, &path, false).expect("migrate");
+
+        let downloads = r"D:\Downloads";
+        let old = r"D:\old";
+        let mut settings = settings_with(downloads, old);
+        settings.source_paths = vec![downloads.to_string()];
+        settings.source_recursive.clear();
+        settings
+            .source_recursive
+            .insert(downloads.to_string(), true);
+        insert_asset(&connection, 1, "hash-1", r"D:\old\a.jpg", old);
+        insert_asset(&connection, 2, "hash-2", r"D:\Downloads\b.jpg", downloads);
+        insert_asset(&connection, 3, "hash-3", r"C:\Library\2026\08\c.jpg", old);
+        connection
+            .execute(
+                "INSERT INTO organize_plans(id, status, total_bytes, created_at)
+                 VALUES ('plan-stale', 'planned', 1, '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("insert plan");
+        connection
+            .execute(
+                "INSERT INTO organize_plan_items(
+                    plan_id, asset_id, source_path, target_path, reason, bytes, conflict
+                 ) VALUES ('plan-stale', 1, 'D:\\old\\a.jpg', 'C:\\Library\\a.jpg', '测试', 1, 0)",
+                [],
+            )
+            .expect("insert plan item");
+
+        let removed = cleanup_stale_indexes_with_settings(&connection, &settings).expect("cleanup");
+        assert_eq!(removed, 1);
+        let remaining_assets: i64 = connection
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+            .expect("count assets");
+        assert_eq!(remaining_assets, 2);
+        let remaining_locations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM asset_locations", [], |row| row.get(0))
+            .expect("count locations");
+        assert_eq!(remaining_locations, 2);
+        let remaining_plan_items: i64 = connection
+            .query_row("SELECT COUNT(*) FROM organize_plan_items", [], |row| {
+                row.get(0)
+            })
+            .expect("count plan items");
+        assert_eq!(remaining_plan_items, 0);
+        let remaining_plans: i64 = connection
+            .query_row("SELECT COUNT(*) FROM organize_plans", [], |row| row.get(0))
+            .expect("count plans");
+        assert_eq!(remaining_plans, 0);
     }
 
     #[test]

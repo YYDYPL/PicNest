@@ -95,10 +95,10 @@ function browserRemovedPaths(path: string, includeSubdirs: boolean): string[] {
   })
 }
 
-function browserIndexCount(removedPaths: string[]): number {
+function browserIndexCount(removedPaths: string[], includeSubdirs: boolean): number {
   const remainingPaths = browserSettings.sourcePaths.filter((path) => !removedPaths.includes(path))
   return browserAssets.filter((asset) => {
-    const removed = removedPaths.some((path) => browserPathInScope(asset.path, path, browserSettings.sourceRecursive?.[path] ?? true))
+    const removed = removedPaths.some((path) => browserPathInScope(asset.path, path, includeSubdirs || (browserSettings.sourceRecursive?.[path] ?? true)))
     const remaining = remainingPaths.some((path) => browserPathInScope(asset.path, path, browserSettings.sourceRecursive?.[path] ?? true))
     return removed && !remaining
   }).length
@@ -165,15 +165,15 @@ export const bridge = {
     const withSubdirs = browserRemovedPaths(path, true)
     return {
       path,
-      current: { monitoredCount: current.length, indexCount: browserIndexCount(current) },
-      withSubdirs: { monitoredCount: withSubdirs.length, indexCount: browserIndexCount(withSubdirs) },
+      current: { monitoredCount: current.length, indexCount: browserIndexCount(current, false) },
+      withSubdirs: { monitoredCount: withSubdirs.length, indexCount: browserIndexCount(withSubdirs, true) },
     }
   },
 
   async removeSource(path: string, includeSubdirs: boolean): Promise<RemoveSourceResult> {
     if (isTauri()) return invoke('remove_source', { path, includeSubdirs })
     const removedPaths = browserRemovedPaths(path, includeSubdirs)
-    const removedIndexes = browserIndexCount(removedPaths)
+    const removedIndexes = browserIndexCount(removedPaths, includeSubdirs)
     const remainingPaths = browserSettings.sourcePaths.filter((candidate) => !removedPaths.includes(candidate))
     const recursive = { ...(browserSettings.sourceRecursive ?? {}) }
     browserSettings = {
@@ -184,7 +184,7 @@ export const bridge = {
       ),
     }
     browserAssets = browserAssets.filter((asset) => {
-      const removed = removedPaths.some((path) => browserPathInScope(asset.path, path, recursive[path] ?? true))
+      const removed = removedPaths.some((path) => browserPathInScope(asset.path, path, includeSubdirs || (recursive[path] ?? true)))
       const remaining = remainingPaths.some((path) => browserPathInScope(asset.path, path, browserSettings.sourceRecursive?.[path] ?? true))
       return !(removed && !remaining)
     })

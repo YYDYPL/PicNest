@@ -53,6 +53,7 @@ impl AppState {
         migrate(&connection, &state.db_path, database_existed)?;
         seed(&connection)?;
         drop(connection);
+        crate::sources::cleanup_stale_indexes(&state)?;
         crate::organize::recover_interrupted_jobs(&state)?;
         state.refresh_watcher()?;
         Ok(state)

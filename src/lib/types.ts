@@ -55,7 +55,7 @@ export interface Album {
 
 export interface ActivityItem {
   id: number
-  kind: 'scan' | 'organize' | 'undo' | 'ai' | 'source'
+  kind: 'scan' | 'organize' | 'undo' | 'ai' | 'source' | 'delete'
   title: string
   detail: string
   createdAt: string
@@ -214,4 +214,12 @@ export interface RemoveSourcePreview {
 export interface RemoveSourceResult {
   removedPaths: string[]
   removedIndexes: number
+}
+
+export interface DeleteAssetsResult {
+  requested: number
+  deletedAssets: number
+  movedFiles: number
+  failedAssets: number
+  failedFiles: number
 }

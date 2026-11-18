@@ -2,7 +2,7 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { AlertCircle, CheckCircle2, Inbox, LoaderCircle, ScanSearch, Sparkles, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { AlbumPickerDialog, CreateAlbumDialog, OrganizeDialog, RecoveryDialog, RemoveSourceDialog, SettingsDialog, TagDialog, ViewerDialog } from './components/Dialogs'
+import { AddSourcesDialog, AlbumPickerDialog, CreateAlbumDialog, DeleteAssetsDialog, OrganizeDialog, RecoveryDialog, RemoveSourceDialog, SettingsDialog, TagDialog, ViewerDialog } from './components/Dialogs'
 import { Inspector } from './components/Inspector'
 import { Onboarding } from './components/Onboarding'
 import { PhotoGrid } from './components/PhotoGrid'
@@ -21,6 +21,7 @@ import type {
   ConnectionTestResult,
   LibraryStats,
   OrganizePlan,
+  OrganizeResult,
   RecoveryJob,
   RemoveSourcePreview,
   SaveSettingsInput,
@@ -63,7 +64,10 @@ export default function App() {
   const [busyLabel, setBusyLabel] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
   const [organizePlan, setOrganizePlan] = useState<OrganizePlan | null>(null)
+  const [organizeResult, setOrganizeResult] = useState<OrganizeResult | null>(null)
   const [applying, setApplying] = useState(false)
+  const [copyingOrganized, setCopyingOrganized] = useState(false)
+  const [copyFeedback, setCopyFeedback] = useState('')
   const [analyzingId, setAnalyzingId] = useState<number | null>(null)
   const [ocringId, setOcringId] = useState<number | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
@@ -88,6 +92,12 @@ export default function App() {
   const [removeSourcePath, setRemoveSourcePath] = useState<string | null>(null)
   const [removeSourcePreview, setRemoveSourcePreview] = useState<RemoveSourcePreview | null>(null)
   const [removingSource, setRemovingSource] = useState(false)
+  const [addSourcesOpen, setAddSourcesOpen] = useState(false)
+  const [pendingSourcePaths, setPendingSourcePaths] = useState<string[]>([])
+  const [addingSources, setAddingSources] = useState(false)
+  const [deleteAssetIds, setDeleteAssetIds] = useState<number[]>([])
+  const [deleteAssetsOpen, setDeleteAssetsOpen] = useState(false)
+  const [deletingAssets, setDeletingAssets] = useState(false)
   const [showDemoBanner, setShowDemoBanner] = useState(true)
   const [canUndo, setCanUndo] = useState(false)
   const [toast, setToast] = useState<ToastState | null>(null)
@@ -102,15 +112,15 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
-  const refreshBootstrap = useCallback(async () => {
+  const refreshBootstrap = useCallback(async (refreshSettings = true) => {
     const payload = await bridge.bootstrap()
     setBoot(payload)
-    setSettings(payload.settings)
+    if (refreshSettings) setSettings(payload.settings)
     setStats(payload.stats)
     setAlbums(payload.albums)
     setActivity(payload.recentActivity)
     setRecoveryJobs(payload.recoveryJobs)
-    setRecoveryOpen(payload.recoveryJobs.length > 0)
+    if (!payload.recoveryJobs.length) setRecoveryOpen(false)
     setCanUndo(payload.recentActivity.some((item) => item.reversible))
     return payload
   }, [])
@@ -142,6 +152,7 @@ export default function App() {
   useEffect(() => {
     void refreshBootstrap()
       .then((payload) => {
+        setRecoveryOpen(payload.recoveryJobs.length > 0)
         if (payload.settings.configured) return loadAssets()
       })
       .catch((error) => notify(error instanceof Error ? error.message : 'PicNest 启动失败', 'error'))
@@ -179,8 +190,8 @@ export default function App() {
     return () => { active = false }
   }, [notify, selectedAssetId, selectedDuplicateCount])
 
-  const reloadAll = useCallback(async () => {
-    const payload = await refreshBootstrap()
+  const reloadAll = useCallback(async (refreshSettings = true) => {
+    const payload = await refreshBootstrap(refreshSettings)
     if (payload.settings.configured) await loadAssets()
   }, [loadAssets, refreshBootstrap])
   const reloadRef = useRef(reloadAll)
@@ -192,17 +203,24 @@ export default function App() {
   }, [loadAssets, loadingMore, nextCursor, ui.activeView, ui.search])
 
   useEffect(() => {
+    let active = true
     let unlisten: (() => void) | undefined
     let timer: number | undefined
     void bridge.onLibraryChanged(() => {
       window.clearTimeout(timer)
-      timer = window.setTimeout(() => void reloadRef.current(), 500)
-    }).then((dispose) => { unlisten = dispose })
+      timer = window.setTimeout(() => {
+        void reloadRef.current(false).catch((error) => notify(typeof error === 'string' ? error : '无法刷新图库', 'error'))
+      }, 500)
+    }).then((dispose) => {
+      if (active) unlisten = dispose
+      else dispose()
+    })
     return () => {
+      active = false
       window.clearTimeout(timer)
       unlisten?.()
     }
-  }, [])
+  }, [notify])
 
   const changeView = (view: ViewId) => {
     if (view !== 'album') setActiveAlbum(null)
@@ -217,23 +235,34 @@ export default function App() {
   const handleAddSource = async () => {
     const paths = await bridge.pickSourceFolders()
     if (!paths.length) return
-    setBusyLabel('正在扫描新文件夹')
-    setScanning(true)
+    const nextPaths = Array.from(new Set(paths.filter((path) => !settings.sourcePaths.includes(path))))
+    if (!nextPaths.length) {
+      notify('所选文件夹已经在监控列表中', 'info')
+      return
+    }
+    setPendingSourcePaths(nextPaths)
+    setAddSourcesOpen(true)
+  }
+
+  const confirmAddSources = async (recursive: Record<string, boolean>) => {
+    const paths = pendingSourcePaths
+    setAddingSources(true)
     try {
       const nextSources = Array.from(new Set([...settings.sourcePaths, ...paths]))
-      const nextRecursive = {
-        ...(settings.sourceRecursive ?? {}),
-        ...Object.fromEntries(paths.map((path) => [path, true])),
-      }
+      const nextRecursive = { ...(settings.sourceRecursive ?? {}), ...recursive }
       await bridge.saveSettings({ ...settings, sourcePaths: nextSources, sourceRecursive: nextRecursive })
+      setAddSourcesOpen(false)
+      setBusyLabel('正在扫描新文件夹')
+      setScanning(true)
       const result = await bridge.scanPaths(paths)
       await reloadAll()
-      notify(result.cancelled ? `扫描已停止，已保留 ${result.indexed} 张索引` : `已索引 ${result.indexed} 张图片，跳过 ${result.skipped} 张未变化文件`, result.cancelled ? 'info' : 'success')
+      notify(`已添加 ${paths.length} 个监控文件夹，索引 ${result.indexed} 张图片，跳过 ${result.skipped} 张未变化文件`, result.cancelled ? 'info' : 'success')
     } catch (error) {
       notify(error instanceof Error ? error.message : '扫描失败', 'error')
     } finally {
       setScanning(false)
       setBusyLabel(null)
+      setAddingSources(false)
     }
   }
 
@@ -269,10 +298,30 @@ export default function App() {
     if (cancelling) notify('正在安全停止扫描，已完成的索引会保留')
   }
 
+  const rescanSources = async (paths: string[]) => {
+    if (!paths.length || busyLabel || savingSettings) return
+    setBusyLabel('正在重新扫描监控文件夹')
+    setScanning(true)
+    try {
+      const result = await bridge.scanPaths(paths)
+      await reloadRef.current(false)
+      const indexed = result.indexed - result.skipped
+      const failures = result.failed ? `，${result.failed} 项扫描失败` : ''
+      notify(`${result.cancelled ? '扫描已停止' : '重新扫描完成'}，已索引 ${indexed} 张新增或更新的图片${failures}`, result.failed || result.cancelled ? 'info' : 'success')
+    } catch (error) {
+      notify(typeof error === 'string' ? error : error instanceof Error ? error.message : '重新扫描失败', 'error')
+    } finally {
+      setScanning(false)
+      setBusyLabel(null)
+    }
+  }
+
   const openOrganize = async (ids?: number[]) => {
     const assetIds = ids?.length ? ids : ui.selectedIds.length ? ui.selectedIds : assets.filter((asset) => asset.needsOrganize).map((asset) => asset.id)
     if (!assetIds.length) return notify('当前没有需要整理的图片')
     setOrganizePlan(null)
+    setOrganizeResult(null)
+    setCopyFeedback('')
     ui.setOrganizeOpen(true)
     try {
       setOrganizePlan(await bridge.createOrganizePlan(assetIds))
@@ -287,15 +336,46 @@ export default function App() {
     setApplying(true)
     try {
       const result = await bridge.applyOrganizePlan(organizePlan.id)
-      ui.setOrganizeOpen(false)
+      setOrganizeResult(result)
       ui.clearSelection()
-      setCanUndo(result.moved > 0)
-      await reloadAll()
-      notify(`已安全整理 ${result.moved} 张图片${result.failed ? `，${result.failed} 张未移动` : ''}`, result.failed ? 'info' : 'success')
+      if (result.moved) setCanUndo(true)
+      await reloadAll(false)
     } catch (error) {
-      notify(error instanceof Error ? error.message : '整理操作失败，原文件未被删除', 'error')
+      notify(typeof error === 'string' ? error : error instanceof Error ? error.message : '无法完成整理操作', 'error')
     } finally {
       setApplying(false)
+    }
+  }
+
+  const copyOrganized = async () => {
+    if (!organizeResult?.moved || copyingOrganized) return
+    setCopyingOrganized(true)
+    setCopyFeedback('')
+    try {
+      const copied = await bridge.copyOrganizedFiles(organizeResult.jobId)
+      const skipped = copied < organizeResult.moved ? '，部分文件已无法访问' : ''
+      setCopyFeedback(`已复制 ${copied} 个图片文件，可按 Ctrl+V 粘贴${skipped}。`)
+    } catch (error) {
+      setCopyFeedback(typeof error === 'string' ? error : error instanceof Error ? error.message : '无法复制图片文件')
+    } finally {
+      setCopyingOrganized(false)
+    }
+  }
+
+  const changeOrganizeOpen = (open: boolean) => {
+    if (applying || copyingOrganized) return
+    ui.setOrganizeOpen(open)
+    if (!open && recoveryJobs.some((job) => job.planId === organizeResult?.jobId)) {
+      setRecoveryOpen(true)
+    }
+  }
+
+  const copyAssetFile = async (asset: Asset) => {
+    try {
+      await bridge.copyAssetFile(asset.id)
+      notify('已复制图片文件，可按 Ctrl+V 粘贴', 'success')
+    } catch (error) {
+      notify(typeof error === 'string' ? error : error instanceof Error ? error.message : '无法复制图片文件', 'error')
     }
   }
 
@@ -422,6 +502,37 @@ export default function App() {
     }
   }
 
+  const openDeleteAssets = (ids: number[]) => {
+    const validIds = Array.from(new Set(ids.filter((id) => assets.some((asset) => asset.id === id))))
+    if (!validIds.length) return
+    setDeleteAssetIds(validIds)
+    setDeleteAssetsOpen(true)
+  }
+
+  const confirmDeleteAssets = async () => {
+    if (!deleteAssetIds.length) return
+    setDeletingAssets(true)
+    try {
+      const result = await bridge.deleteAssets(deleteAssetIds)
+      setDeleteAssetsOpen(false)
+      ui.setViewerOpen(false)
+      ui.clearSelection()
+      ui.selectAsset(null)
+      await reloadAll()
+      if (result.failedAssets > 0) {
+        notify(`已移入回收站 ${result.movedFiles} 个文件，${result.failedAssets} 张图片因文件发生变化、被占用或无权限而保留`, result.movedFiles ? 'info' : 'error')
+      } else if (result.movedFiles > 0) {
+        notify(`已将 ${result.deletedAssets} 张图片（${result.movedFiles} 个文件）移入系统回收站`, 'success')
+      } else {
+        notify(`已清理 ${result.deletedAssets} 张缺失图片的本地索引`, 'success')
+      }
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '无法将图片移入系统回收站', 'error')
+    } finally {
+      setDeletingAssets(false)
+    }
+  }
+
   const saveSettings = async (input: SaveSettingsInput) => {
     setSavingSettings(true)
     try {
@@ -436,6 +547,7 @@ export default function App() {
       ui.setSettingsOpen(false)
       if (changedSources.length) {
         const result = await bridge.scanPaths(changedSources)
+        await reloadRef.current(false)
         notify(`设置已保存，已重新扫描 ${changedSources.length} 个目录${result.cancelled ? '，扫描已停止' : ''}`, result.cancelled ? 'info' : 'success')
       } else {
         notify('设置已保存', 'success')
@@ -514,11 +626,16 @@ export default function App() {
   }
 
   const resumeRecovery = async (planId: string) => {
+    const alreadyMoved = recoveryJobs.find((job) => job.planId === planId)?.moved ?? 0
     setRecoveryBusyPlanId(planId)
     try {
       const result = await bridge.applyOrganizePlan(planId)
       await reloadAll()
-      notify(`已继续整理 ${result.moved} 张图片`, result.failed ? 'info' : 'success')
+      setRecoveryOpen(false)
+      setOrganizePlan(null)
+      setOrganizeResult({ ...result, moved: alreadyMoved + result.moved })
+      setCopyFeedback('')
+      ui.setOrganizeOpen(true)
     } catch (error) {
       notify(error instanceof Error ? error.message : '无法继续整理任务', 'error')
     } finally {
@@ -575,12 +692,15 @@ export default function App() {
             selectedCount={ui.selectedIds.length}
             inspectorOpen={ui.inspectorOpen}
             canUndo={canUndo}
-            busy={Boolean(busyLabel)}
+            busy={Boolean(busyLabel) || deletingAssets || savingSettings}
+            hasSources={settings.sourcePaths.length > 0}
             onSearch={ui.setSearch}
             onAddSource={handleAddSource}
+            onRescan={() => rescanSources(settings.sourcePaths)}
             onOrganize={() => openOrganize()}
             onAddToAlbum={() => openAlbumPicker(ui.selectedIds)}
             onEditTags={() => openTagEditor(ui.selectedIds)}
+            onDelete={() => openDeleteAssets(ui.selectedIds)}
             onUndo={undo}
             onClearSelection={ui.clearSelection}
             onToggleInspector={() => ui.setInspectorOpen(!ui.inspectorOpen)}
@@ -598,7 +718,7 @@ export default function App() {
                     <span><strong>{inboxCounts.camera}</strong>相机照片</span>
                     <span><strong>{inboxCounts.duplicates}</strong>重复项</span>
                   </div>
-                  <button className="primary-button compact" type="button" onClick={() => openOrganize(assets.map((asset) => asset.id))} disabled={!assets.length}><Sparkles size={16} />预览全部建议</button>
+                  <button className="primary-button compact" type="button" onClick={() => openOrganize(assets.map((asset) => asset.id))} disabled={!assets.length || Boolean(busyLabel)}><Sparkles size={16} />预览全部建议</button>
                 </section>
               ) : null}
 
@@ -626,12 +746,14 @@ export default function App() {
                 onAnalyze={analyze}
                 onOcr={extractText}
                 onReveal={(asset) => bridge.revealPath(asset.path)}
+                onCopyFile={boot?.demoMode ? undefined : copyAssetFile}
                 albums={albums}
                 locations={assetLocations}
                 locationsLoading={locationsLoading}
                 onAddToAlbum={(asset) => openAlbumPicker([asset.id])}
                 onEditTags={(asset) => openTagEditor([asset.id])}
                 onTrashDuplicate={trashDuplicate}
+                onDelete={(asset) => openDeleteAssets([asset.id])}
               />
             ) : null}
           </div>
@@ -640,10 +762,12 @@ export default function App() {
         {busyLabel ? <div className="busy-status"><LoaderCircle className="spin" size={16} /><span>{busyLabel}</span>{scanning ? <button type="button" onClick={cancelScan}>停止扫描</button> : null}</div> : null}
         {toast ? <div className="toast" data-tone={toast.tone}>{toast.tone === 'success' ? <CheckCircle2 size={17} /> : toast.tone === 'error' ? <AlertCircle size={17} /> : <ScanSearch size={17} />}<span>{toast.message}</span><button type="button" aria-label="关闭通知" onClick={() => setToast(null)}><X size={14} /></button></div> : null}
 
-        <OrganizeDialog open={ui.organizeOpen} plan={organizePlan} applying={applying} onOpenChange={ui.setOrganizeOpen} onApply={applyPlan} />
-        <SettingsDialog open={ui.settingsOpen} settings={settings} saving={savingSettings} testingConnection={testingConnection} connectionResult={connectionResult} exportingDiagnostics={exportingDiagnostics} onOpenChange={ui.setSettingsOpen} onSave={saveSettings} onTestConnection={testAiConnection} onDeleteApiKey={deleteApiKey} onClearAiResults={clearAiResults} onExportDiagnostics={exportDiagnostics} onRemoveSource={openRemoveSource} />
+        <OrganizeDialog open={ui.organizeOpen} plan={organizePlan} result={organizeResult} applying={applying} copying={copyingOrganized} copyFeedback={copyFeedback} onOpenChange={changeOrganizeOpen} onApply={applyPlan} onCopy={boot?.demoMode ? undefined : copyOrganized} />
+        <SettingsDialog open={ui.settingsOpen} settings={settings} saving={savingSettings} sourceActionsBusy={Boolean(busyLabel)} scanning={scanning} testingConnection={testingConnection} connectionResult={connectionResult} exportingDiagnostics={exportingDiagnostics} onOpenChange={ui.setSettingsOpen} onSave={saveSettings} onTestConnection={testAiConnection} onDeleteApiKey={deleteApiKey} onClearAiResults={clearAiResults} onExportDiagnostics={exportDiagnostics} onRescanSource={(path) => rescanSources([path])} onCancelScan={cancelScan} onRemoveSource={openRemoveSource} />
         <RemoveSourceDialog open={removeSourceOpen} path={removeSourcePath ?? ''} preview={removeSourcePreview} removing={removingSource} onOpenChange={setRemoveSourceOpen} onRemove={confirmRemoveSource} />
-        <ViewerDialog open={ui.viewerOpen} asset={selectedAsset} hasPrevious={viewerIndex > 0} hasNext={viewerIndex >= 0 && viewerIndex < assets.length - 1} onOpenChange={ui.setViewerOpen} onPrevious={() => navigateViewer(-1)} onNext={() => navigateViewer(1)} />
+        <AddSourcesDialog open={addSourcesOpen} paths={pendingSourcePaths} adding={addingSources} onOpenChange={setAddSourcesOpen} onConfirm={confirmAddSources} />
+        <DeleteAssetsDialog open={deleteAssetsOpen} count={deleteAssetIds.length} deleting={deletingAssets} onOpenChange={setDeleteAssetsOpen} onDelete={confirmDeleteAssets} />
+        <ViewerDialog open={ui.viewerOpen} asset={selectedAsset} hasPrevious={viewerIndex > 0} hasNext={viewerIndex >= 0 && viewerIndex < assets.length - 1} onOpenChange={ui.setViewerOpen} onPrevious={() => navigateViewer(-1)} onNext={() => navigateViewer(1)} onDelete={(asset) => { ui.setViewerOpen(false); openDeleteAssets([asset.id]) }} />
         <CreateAlbumDialog open={albumDialogOpen} saving={savingAlbum} onOpenChange={setAlbumDialogOpen} onCreate={createAlbum} />
         <AlbumPickerDialog open={albumPickerOpen} albums={albums} count={dialogAssetIds.length} saving={savingAlbumAssignment} onOpenChange={setAlbumPickerOpen} onAssign={assignToAlbum} />
         <TagDialog open={tagDialogOpen} count={dialogAssetIds.length} initialTags={tagDialogInitial} saving={savingTags} onOpenChange={setTagDialogOpen} onSave={saveTags} />

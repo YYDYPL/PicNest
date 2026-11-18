@@ -26,12 +26,14 @@ interface InspectorProps {
   onAnalyze: (asset: Asset) => void
   onOcr: (asset: Asset) => void
   onReveal: (asset: Asset) => void
+  onCopyFile?: (asset: Asset) => void
   albums: Album[]
   locations: AssetLocation[]
   locationsLoading: boolean
   onAddToAlbum: (asset: Asset) => void
   onEditTags: (asset: Asset) => void
   onTrashDuplicate: (asset: Asset, location: AssetLocation) => void
+  onDelete: (asset: Asset) => void
 }
 
 function Preview({ asset }: { asset: Asset }) {
@@ -45,7 +47,7 @@ function Preview({ asset }: { asset: Asset }) {
   )
 }
 
-export function Inspector({ asset, analyzing, ocring, onFavorite, onAnalyze, onOcr, onReveal, albums, locations, locationsLoading, onAddToAlbum, onEditTags, onTrashDuplicate }: InspectorProps) {
+export function Inspector({ asset, analyzing, ocring, onFavorite, onAnalyze, onOcr, onReveal, onCopyFile, albums, locations, locationsLoading, onAddToAlbum, onEditTags, onTrashDuplicate, onDelete }: InspectorProps) {
   if (!asset) {
     return (
       <aside className="inspector inspector-empty">
@@ -65,6 +67,9 @@ export function Inspector({ asset, analyzing, ocring, onFavorite, onAnalyze, onO
         </div>
         <button className="icon-button" type="button" aria-label={asset.favorite ? '取消收藏' : '收藏'} onClick={() => onFavorite(asset)}>
           <Heart size={18} fill={asset.favorite ? 'currentColor' : 'none'} />
+        </button>
+        <button className="icon-button danger-icon-button" type="button" aria-label="移入回收站" title="移入回收站" onClick={() => onDelete(asset)}>
+          <Trash2 size={18} />
         </button>
       </div>
 
@@ -129,7 +134,10 @@ export function Inspector({ asset, analyzing, ocring, onFavorite, onAnalyze, onO
       <section className="inspector-section path-section">
         <h3>文件位置</h3>
         <p title={asset.path}>{asset.path}</p>
-        <button className="text-button" type="button" onClick={() => onReveal(asset)}><FolderOpen size={15} />在资源管理器中显示<ExternalLink size={13} /></button>
+        <div className="inspector-inline-actions">
+          {onCopyFile ? <button className="text-button" type="button" disabled={asset.missing} onClick={() => onCopyFile(asset)}><Copy size={15} />复制图片文件</button> : null}
+          <button className="text-button" type="button" onClick={() => onReveal(asset)}><FolderOpen size={15} />在资源管理器中显示<ExternalLink size={13} /></button>
+        </div>
       </section>
     </aside>
   )

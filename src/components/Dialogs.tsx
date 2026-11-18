@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  Copy,
   Eye,
   EyeOff,
   FileDown,
@@ -13,6 +14,7 @@ import {
   KeyRound,
   LoaderCircle,
   LockKeyhole,
+  RefreshCw,
   ShieldCheck,
   Sparkles,
   Tags,
@@ -25,28 +27,59 @@ import {
 import { useEffect, useState } from 'react'
 import { formatBytes, formatDateTime } from '../lib/format'
 import { useAssetImage } from '../lib/images'
-import type { Album, AppSettings, Asset, ConnectionTestResult, OrganizePlan, RecoveryJob, RemoveSourcePreview, SaveSettingsInput } from '../lib/types'
+import type { Album, AppSettings, Asset, ConnectionTestResult, OrganizePlan, OrganizeResult, RecoveryJob, RemoveSourcePreview, SaveSettingsInput } from '../lib/types'
 
-function CloseButton() {
+function CloseButton({ disabled = false }: { disabled?: boolean }) {
   return (
     <Dialog.Close asChild>
-      <button className="icon-button dialog-close" type="button" aria-label="关闭"><X size={18} /></button>
+      <button className="icon-button dialog-close" type="button" aria-label="关闭" disabled={disabled}><X size={18} /></button>
     </Dialog.Close>
   )
 }
 
-export function OrganizeDialog({ open, plan, applying, onOpenChange, onApply }: { open: boolean; plan: OrganizePlan | null; applying: boolean; onOpenChange: (open: boolean) => void; onApply: () => void }) {
+interface OrganizeDialogProps {
+  open: boolean
+  plan: OrganizePlan | null
+  result: OrganizeResult | null
+  applying: boolean
+  copying: boolean
+  copyFeedback: string
+  onOpenChange: (open: boolean) => void
+  onApply: () => void
+  onCopy?: () => void
+}
+
+export function OrganizeDialog({ open, plan, result, applying, copying, copyFeedback, onOpenChange, onApply, onCopy }: OrganizeDialogProps) {
+  const canCopy = Boolean(onCopy && result?.moved)
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content organize-dialog">
+        <Dialog.Content className={`dialog-content ${result ? 'compact-dialog' : 'organize-dialog'}`}>
           <div className="dialog-header">
-            <div><Dialog.Title>预览整理结果</Dialog.Title><Dialog.Description>确认后才会移动原文件，整个操作可以撤销。</Dialog.Description></div>
-            <CloseButton />
+            <div>
+              <Dialog.Title>{result ? '整理结果' : '预览整理结果'}</Dialog.Title>
+              <Dialog.Description>
+                {result ? `已整理 ${result.moved} 张图片${result.failed ? `，${result.failed} 张未移动` : ''}` : '确认后才会移动原文件，整个操作可以撤销。'}
+              </Dialog.Description>
+            </div>
+            <CloseButton disabled={applying || copying} />
           </div>
 
-          {plan ? (
+          {result ? (
+            <>
+              {canCopy ? <p className="organize-copy-status" role="status">{copyFeedback || '复制后可在资源管理器中按 Ctrl+V 粘贴。'}</p> : null}
+              <div className="dialog-actions">
+                <Dialog.Close asChild><button className={canCopy ? 'secondary-button' : 'primary-button'} type="button" disabled={applying || copying}>完成</button></Dialog.Close>
+                {canCopy ? (
+                  <button className="primary-button" type="button" onClick={onCopy} disabled={applying || copying}>
+                    {copying ? <LoaderCircle className="spin" size={16} /> : <Copy size={16} />}
+                    {copying ? '正在复制…' : '复制图片文件'}
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : plan ? (
             <>
               <div className="plan-summary">
                 <div><strong>{plan.items.length}</strong><span>张图片</span></div>
@@ -84,7 +117,27 @@ export function OrganizeDialog({ open, plan, applying, onOpenChange, onApply }: 
   )
 }
 
-export function SettingsDialog({ open, settings, saving, testingConnection, connectionResult, exportingDiagnostics, onOpenChange, onSave, onTestConnection, onDeleteApiKey, onClearAiResults, onExportDiagnostics, onRemoveSource }: { open: boolean; settings: AppSettings; saving: boolean; testingConnection: boolean; connectionResult: ConnectionTestResult | null; exportingDiagnostics: boolean; onOpenChange: (open: boolean) => void; onSave: (input: SaveSettingsInput) => void; onTestConnection: (input: SaveSettingsInput) => void; onDeleteApiKey: () => void; onClearAiResults: () => void; onExportDiagnostics: () => void; onRemoveSource: (path: string) => void }) {
+interface SettingsDialogProps {
+  open: boolean
+  settings: AppSettings
+  saving: boolean
+  sourceActionsBusy: boolean
+  scanning: boolean
+  testingConnection: boolean
+  connectionResult: ConnectionTestResult | null
+  exportingDiagnostics: boolean
+  onOpenChange: (open: boolean) => void
+  onSave: (input: SaveSettingsInput) => void
+  onTestConnection: (input: SaveSettingsInput) => void
+  onDeleteApiKey: () => void
+  onClearAiResults: () => void
+  onExportDiagnostics: () => void
+  onRescanSource: (path: string) => void
+  onCancelScan: () => void
+  onRemoveSource: (path: string) => void
+}
+
+export function SettingsDialog({ open, settings, saving, sourceActionsBusy, scanning, testingConnection, connectionResult, exportingDiagnostics, onOpenChange, onSave, onTestConnection, onDeleteApiKey, onClearAiResults, onExportDiagnostics, onRescanSource, onCancelScan, onRemoveSource }: SettingsDialogProps) {
   const [draft, setDraft] = useState<SaveSettingsInput>(settings)
   const [showKey, setShowKey] = useState(false)
 
@@ -113,7 +166,7 @@ export function SettingsDialog({ open, settings, saving, testingConnection, conn
               <div className="source-list">
                 <span>正在监控的文件夹</span>
                 {draft.sourcePaths.map((path) => (
-                  <div className="source-row" key={path}>
+                  <div className="source-row monitored-source-row" key={path}>
                     <span className="source-path" title={path}>{path}</span>
                     <span className="source-scope-label">包含子目录</span>
                     <Switch.Root
@@ -124,7 +177,8 @@ export function SettingsDialog({ open, settings, saving, testingConnection, conn
                     >
                       <Switch.Thumb className="switch-thumb" />
                     </Switch.Root>
-                    <button className="source-remove" type="button" aria-label={`移除监控 ${path}`} onClick={() => onRemoveSource(path)}><Trash2 size={15} /></button>
+                    <button className="secondary-button compact" type="button" aria-label={`重新扫描 ${path}`} title="按已保存的监控范围重新扫描" disabled={saving || sourceActionsBusy} onClick={() => onRescanSource(path)}><RefreshCw size={14} />重新扫描</button>
+                    <button className="source-remove" type="button" aria-label={`移除监控 ${path}`} disabled={saving || sourceActionsBusy} onClick={() => onRemoveSource(path)}><Trash2 size={15} /></button>
                   </div>
                 ))}
               </div>
@@ -165,8 +219,9 @@ export function SettingsDialog({ open, settings, saving, testingConnection, conn
           </div>
 
           <div className="dialog-actions">
+            {scanning ? <button className="secondary-button" type="button" onClick={onCancelScan}><LoaderCircle className="spin" size={16} />停止扫描</button> : null}
             <Dialog.Close asChild><button className="secondary-button" type="button" disabled={saving}>取消</button></Dialog.Close>
-            <button className="primary-button" type="button" onClick={() => onSave(draft)} disabled={saving || !draft.libraryPath.trim()}>{saving ? <LoaderCircle className="spin" size={16} /> : null}保存设置</button>
+            <button className="primary-button" type="button" onClick={() => onSave(draft)} disabled={saving || sourceActionsBusy || !draft.libraryPath.trim()}>{saving ? <LoaderCircle className="spin" size={16} /> : null}保存设置</button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -216,6 +271,80 @@ export function RemoveSourceDialog({ open, path, preview, removing, onOpenChange
   )
 }
 
+export function DeleteAssetsDialog({ open, count, deleting, onOpenChange, onDelete }: { open: boolean; count: number; deleting: boolean; onOpenChange: (open: boolean) => void; onDelete: () => void }) {
+  return (
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!deleting || nextOpen) onOpenChange(nextOpen) }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content compact-dialog">
+          <div className="dialog-header">
+            <div><Dialog.Title>移入回收站</Dialog.Title><Dialog.Description>确认后，选中图片的所有已索引本地副本会移入 Windows 系统回收站。</Dialog.Description></div>
+            <CloseButton disabled={deleting} />
+          </div>
+          <div className="compact-dialog-body delete-assets-body">
+            <div className="delete-assets-warning"><AlertTriangle size={19} /><p>将处理 <strong>{count}</strong> 张图片。PicNest 不会永久删除文件；缺失文件只会清理本地索引。</p></div>
+            <div className="safety-note"><ShieldCheck size={17} /><span>如果文件内容发生变化、正在使用或没有权限，PicNest 会保留它并报告失败数量。</span></div>
+          </div>
+          <div className="dialog-actions">
+            <Dialog.Close asChild><button className="secondary-button" type="button" disabled={deleting}>取消</button></Dialog.Close>
+            <button className="primary-button danger-remove-button" type="button" onClick={onDelete} disabled={deleting || count === 0}>
+              {deleting ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={15} />}
+              {deleting ? '正在移入回收站…' : '移入回收站'}
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+export function AddSourcesDialog({ open, paths, adding, onOpenChange, onConfirm }: { open: boolean; paths: string[]; adding: boolean; onOpenChange: (open: boolean) => void; onConfirm: (recursive: Record<string, boolean>) => void }) {
+  const [recursive, setRecursive] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    if (open) setRecursive(Object.fromEntries(paths.map((path) => [path, true])))
+  }, [open, paths])
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content compact-dialog">
+          <div className="dialog-header">
+            <div><Dialog.Title>添加监控文件夹</Dialog.Title><Dialog.Description>默认包含子目录，可以在确认前逐个关闭。</Dialog.Description></div>
+            <CloseButton />
+          </div>
+          <div className="compact-dialog-body add-sources-body">
+            <div className="add-sources-list" role="list">
+              {paths.map((path) => (
+                <div className="source-row add-source-row" key={path} role="listitem">
+                  <span className="source-path" title={path}>{path}</span>
+                  <span className="source-scope-label">包含子目录</span>
+                  <Switch.Root
+                    className="switch-root source-switch"
+                    checked={Boolean(recursive[path] ?? true)}
+                    onCheckedChange={(checked) => setRecursive((current) => ({ ...current, [path]: checked }))}
+                    aria-label={`${path} 包含子目录`}
+                  >
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </div>
+              ))}
+            </div>
+            <div className="safety-note"><FolderPlus size={17} /><span>关闭后只扫描当前目录的直接图片，不会读取子文件夹。</span></div>
+          </div>
+          <div className="dialog-actions">
+            <Dialog.Close asChild><button className="secondary-button" type="button" disabled={adding}>取消</button></Dialog.Close>
+            <button className="primary-button" type="button" onClick={() => onConfirm(recursive)} disabled={adding || paths.length === 0}>
+              {adding ? <LoaderCircle className="spin" size={16} /> : <FolderPlus size={16} />}
+              {adding ? '正在添加并扫描…' : `添加并扫描 ${paths.length} 个文件夹`}
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
 function ViewerImage({ asset, zoom }: { asset: Asset; zoom: number }) {
   const [a, b, c] = asset.palette ?? ['#496b65', '#d6ae78', '#829ba0']
   const imageSource = useAssetImage(asset, true)
@@ -223,7 +352,7 @@ function ViewerImage({ asset, zoom }: { asset: Asset; zoom: number }) {
   return <div className="demo-photo viewer-demo" style={{ '--tone-a': a, '--tone-b': b, '--tone-c': c, transform: `scale(${zoom})` } as React.CSSProperties}><span className="demo-sky" /><span className="demo-horizon" /><span className="demo-subject" /><span className="demo-grain" /></div>
 }
 
-export function ViewerDialog({ open, asset, hasPrevious, hasNext, onOpenChange, onPrevious, onNext }: { open: boolean; asset: Asset | null; hasPrevious: boolean; hasNext: boolean; onOpenChange: (open: boolean) => void; onPrevious: () => void; onNext: () => void }) {
+export function ViewerDialog({ open, asset, hasPrevious, hasNext, onOpenChange, onPrevious, onNext, onDelete }: { open: boolean; asset: Asset | null; hasPrevious: boolean; hasNext: boolean; onOpenChange: (open: boolean) => void; onPrevious: () => void; onNext: () => void; onDelete: (asset: Asset) => void }) {
   const [zoom, setZoom] = useState(1)
   useEffect(() => setZoom(1), [asset?.id, open])
   return (
@@ -238,6 +367,7 @@ export function ViewerDialog({ open, asset, hasPrevious, hasNext, onOpenChange, 
               <button className="viewer-icon-button" type="button" aria-label="缩小" onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}><ZoomOut size={19} /></button>
               <span className="zoom-value">{Math.round(zoom * 100)}%</span>
               <button className="viewer-icon-button" type="button" aria-label="放大" onClick={() => setZoom((value) => Math.min(3, value + 0.25))}><ZoomIn size={19} /></button>
+              {asset ? <button className="viewer-icon-button viewer-delete-button" type="button" aria-label="移入回收站" onClick={() => onDelete(asset)}><Trash2 size={19} /></button> : null}
               <Dialog.Close asChild><button className="viewer-icon-button" type="button" aria-label="关闭"><X size={20} /></button></Dialog.Close>
             </div>
           </div>

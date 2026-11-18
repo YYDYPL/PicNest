@@ -14,6 +14,7 @@ import type {
   AiConnectionInput,
   AppSettings,
   AssetLocation,
+  DeleteAssetsResult,
   Asset,
   AssetPage,
   AssetQuery,
@@ -245,6 +246,16 @@ export const bridge = {
     return { jobId: planId, moved: browserLastPlan.items.length, failed: 0 }
   },
 
+  async copyOrganizedFiles(planId: string): Promise<number> {
+    if (isTauri()) return invoke('copy_organized_files', { planId })
+    throw new Error('复制图片文件需要 Windows 桌面版')
+  },
+
+  async copyAssetFile(assetId: number): Promise<void> {
+    if (isTauri()) return invoke('copy_asset_file', { assetId })
+    throw new Error('复制图片文件需要 Windows 桌面版')
+  },
+
   async undoLastOperation(): Promise<number> {
     if (isTauri()) return invoke('undo_last_operation')
     if (!browserLastPlan) return 0
@@ -373,6 +384,40 @@ export const bridge = {
     const asset = browserAssets.find((candidate) => candidate.id === assetId)
     if (!asset || path === asset.path || asset.duplicateCount < 1) throw new Error('需要保留至少一个可用副本')
     asset.duplicateCount -= 1
+  },
+
+  async deleteAssets(assetIds: number[]): Promise<DeleteAssetsResult> {
+    if (isTauri()) {
+      const result = await invoke<DeleteAssetsResult>('delete_assets', { assetIds })
+      for (const assetId of assetIds) {
+        thumbnailCache.delete(assetId)
+        previewCache.delete(assetId)
+      }
+      return result
+    }
+    const ids = new Set(assetIds)
+    const removed = browserAssets.filter((asset) => ids.has(asset.id))
+    browserAssets = browserAssets.filter((asset) => !ids.has(asset.id))
+    for (const asset of removed) {
+      for (const albumId of asset.albumIds) {
+        const album = demoAlbums.find((candidate) => candidate.id === albumId)
+        if (album) album.count = Math.max(0, album.count - 1)
+      }
+      thumbnailCache.delete(asset.id)
+      previewCache.delete(asset.id)
+    }
+    const movedFiles = removed.reduce((count, asset) => count + (asset.missing ? 0 : asset.duplicateCount + 1), 0)
+    if (removed.length) {
+      demoActivity.unshift({
+        id: Math.max(0, ...demoActivity.map((item) => item.id)) + 1,
+        kind: 'delete',
+        title: `删除了 ${removed.length} 张图片`,
+        detail: `已将 ${movedFiles} 个本地文件移入系统回收站`,
+        createdAt: new Date().toISOString(),
+        reversible: false,
+      })
+    }
+    return { requested: ids.size, deletedAssets: removed.length, movedFiles, failedAssets: ids.size - removed.length, failedFiles: 0 }
   },
 
   async saveSettings(settings: SaveSettingsInput): Promise<AppSettings> {

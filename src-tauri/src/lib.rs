@@ -1,4 +1,6 @@
 mod ai;
+#[cfg(windows)]
+mod clipboard;
 mod commands;
 mod db;
 mod diagnostics;
@@ -42,6 +44,8 @@ pub fn run() {
             commands::remove_source,
             commands::create_organize_plan,
             commands::apply_organize_plan,
+            commands::copy_organized_files,
+            commands::copy_asset_file,
             commands::undo_last_operation,
             commands::rollback_organize_plan,
             commands::set_favorite,
@@ -57,6 +61,7 @@ pub fn run() {
             commands::set_asset_tags,
             commands::list_asset_locations,
             commands::move_duplicate_to_trash,
+            commands::delete_assets,
             commands::export_diagnostics,
         ])
         .run(tauri::generate_context!())

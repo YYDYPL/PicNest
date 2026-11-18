@@ -1,9 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { AddSourcesDialog, DeleteAssetsDialog } from './components/Dialogs'
+import { bridge } from './lib/bridge'
+import { useLibraryUi } from './store/library'
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
+  useLibraryUi.setState(useLibraryUi.getInitialState())
   document.body.removeAttribute('data-scroll-locked')
   document.body.style.pointerEvents = ''
   document.querySelectorAll('[data-radix-focus-guard]').forEach((element) => element.remove())
@@ -48,5 +53,86 @@ describe('PicNest workbench', () => {
     await waitFor(() => expect(screen.queryByText('移除监控文件夹')).not.toBeInTheDocument())
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.queryByText('C:\\Users\\me\\Desktop')).not.toBeInTheDocument()
+  })
+
+  it('lets each newly added source choose whether subdirectories are included', async () => {
+    const onConfirm = vi.fn()
+    render(
+      <AddSourcesDialog
+        open
+        paths={['C:\\Users\\me\\Desktop', 'C:\\Users\\me\\Downloads']}
+        adding={false}
+        onOpenChange={() => undefined}
+        onConfirm={onConfirm}
+      />,
+    )
+
+    const desktopSwitch = screen.getByLabelText('C:\\Users\\me\\Desktop 包含子目录')
+    const downloadsSwitch = screen.getByLabelText('C:\\Users\\me\\Downloads 包含子目录')
+    expect(desktopSwitch).toHaveAttribute('aria-checked', 'true')
+    expect(downloadsSwitch).toHaveAttribute('aria-checked', 'true')
+
+    fireEvent.click(desktopSwitch)
+    expect(desktopSwitch).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '添加并扫描 2 个文件夹' }))
+
+    expect(onConfirm).toHaveBeenCalledWith({
+      'C:\\Users\\me\\Desktop': false,
+      'C:\\Users\\me\\Downloads': true,
+    })
+  })
+
+  it('rescans an existing monitored source and preserves settings edits', async () => {
+    const scan = vi.spyOn(bridge, 'scanPaths').mockResolvedValue({
+      discovered: 3, indexed: 3, skipped: 2, duplicates: 0, unsupported: 0, failed: 0, cancelled: false,
+    })
+    const path = 'C:\\Users\\me\\Downloads'
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }))
+    const libraryPath = screen.getByLabelText('图库位置')
+    fireEvent.change(libraryPath, { target: { value: 'D:\\Photos' } })
+    fireEvent.click(screen.getByRole('button', { name: `重新扫描 ${path}` }))
+
+    expect(scan).toHaveBeenCalledWith([path])
+    expect(await screen.findByText(/已索引 1 张新增或更新的图片/)).toBeInTheDocument()
+    expect(libraryPath).toHaveValue('D:\\Photos')
+  })
+
+  it('can copy the successfully organized files when only part of a plan succeeds', async () => {
+    const boot = await bridge.bootstrap()
+    vi.spyOn(bridge, 'bootstrap').mockResolvedValue({ ...boot, demoMode: false })
+    vi.spyOn(bridge, 'applyOrganizePlan').mockResolvedValue({ jobId: 'partially-completed', moved: 1, failed: 1 })
+    const copy = vi.spyOn(bridge, 'copyOrganizedFiles').mockResolvedValue(1)
+    render(<App />)
+
+    const preview = await screen.findByRole('button', { name: '预览全部建议' })
+    await waitFor(() => expect(preview).toBeEnabled())
+    fireEvent.click(preview)
+    fireEvent.click(await screen.findByRole('button', { name: /^整理 \d+ 张图片$/ }))
+    expect(await screen.findByText('已整理 1 张图片，1 张未移动')).toBeInTheDocument()
+    const copyButton = screen.getByRole('button', { name: '复制图片文件' })
+    await waitFor(() => expect(copyButton).toBeEnabled())
+    fireEvent.click(copyButton)
+
+    expect(copy).toHaveBeenCalledWith('partially-completed')
+    expect(await screen.findByRole('status')).toHaveTextContent('已复制 1 个图片文件')
+  })
+
+  it('confirms moving all indexed copies to the recycle bin', () => {
+    const onDelete = vi.fn()
+    render(
+      <DeleteAssetsDialog
+        open
+        count={3}
+        deleting={false}
+        onOpenChange={() => undefined}
+        onDelete={onDelete}
+      />,
+    )
+
+    expect(screen.getByText(/所有已索引本地副本/)).toBeInTheDocument()
+    expect(screen.getByText(/将处理/)).toHaveTextContent('3')
+    fireEvent.click(screen.getByRole('button', { name: '移入回收站' }))
+    expect(onDelete).toHaveBeenCalledOnce()
   })
 })

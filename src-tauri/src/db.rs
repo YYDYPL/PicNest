@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
     time::Duration,
 };
@@ -28,6 +28,7 @@ pub struct AppState {
     pub thumbnail_dir: PathBuf,
     pub scan_cancelled: Arc<AtomicBool>,
     pub scan_running: Arc<AtomicBool>,
+    index_lock: Arc<Mutex<()>>,
     pub watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
 }
 
@@ -47,6 +48,7 @@ impl AppState {
             thumbnail_dir,
             scan_cancelled: Arc::new(AtomicBool::new(false)),
             scan_running: Arc::new(AtomicBool::new(false)),
+            index_lock: Arc::new(Mutex::new(())),
             watcher: Arc::new(Mutex::new(None)),
         };
         let connection = state.connection()?;
@@ -84,6 +86,12 @@ impl AppState {
             self.scan_cancelled.store(true, Ordering::SeqCst);
         }
         running
+    }
+
+    pub fn lock_index(&self) -> AppResult<MutexGuard<'_, ()>> {
+        self.index_lock
+            .lock()
+            .map_err(|_| AppError::Message("图片索引暂不可用".to_string()))
     }
 
     pub fn refresh_watcher(&self) -> AppResult<()> {

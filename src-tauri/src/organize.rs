@@ -13,7 +13,7 @@ use crate::{
     db::{add_activity, load_settings, sync_search_row, AppState},
     error::{AppError, AppResult},
     library::hash_file,
-    models::{OrganizePlan, OrganizePlanItem, OrganizeResult, RecoveryJob},
+    models::{DeleteAssetsResult, OrganizePlan, OrganizePlanItem, OrganizeResult, RecoveryJob},
 };
 
 pub fn create_plan(state: &AppState, asset_ids: &[i64]) -> AppResult<OrganizePlan> {
@@ -109,6 +109,7 @@ pub fn create_plan(state: &AppState, asset_ids: &[i64]) -> AppResult<OrganizePla
 }
 
 pub fn apply_plan(state: &AppState, plan_id: &str) -> AppResult<OrganizeResult> {
+    let _index = state.lock_index()?;
     let connection = state.connection()?;
     let status: Option<String> = connection
         .query_row(
@@ -219,6 +220,45 @@ pub fn apply_plan(state: &AppState, plan_id: &str) -> AppResult<OrganizeResult> 
         moved,
         failed,
     })
+}
+
+#[cfg(windows)]
+fn organized_file_paths(connection: &rusqlite::Connection, plan_id: &str) -> AppResult<Vec<PathBuf>> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT i.target_path
+         FROM organize_plan_items i JOIN asset_locations l
+           ON l.asset_id = i.asset_id AND l.path = i.target_path
+         WHERE i.plan_id = ?1 AND i.status = 'moved' AND l.needs_organize = 0
+         ORDER BY i.id",
+    )?;
+    let rows = statement.query_map(params![plan_id], |row| row.get::<_, String>(0))?;
+    let paths = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(paths
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect())
+}
+
+pub fn copy_organized_files(
+    state: &AppState,
+    window: &tauri::WebviewWindow,
+    plan_id: &str,
+) -> AppResult<usize> {
+    #[cfg(windows)]
+    {
+        let paths = organized_file_paths(&state.connection()?, plan_id)?;
+        if paths.is_empty() {
+            return Err(AppError::Message("没有可复制的已整理图片文件".to_string()));
+        }
+        crate::clipboard::copy_files(window, &paths)?;
+        Ok(paths.len())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (state, window, plan_id);
+        Err(AppError::Message("复制图片文件需要 Windows 桌面版".to_string()))
+    }
 }
 
 fn ensure_plan_disk_space(connection: &rusqlite::Connection, plan_id: &str) -> AppResult<()> {
@@ -413,6 +453,7 @@ pub fn rollback_plan(state: &AppState, plan_id: &str) -> AppResult<u32> {
 }
 
 fn rollback_plan_internal(state: &AppState, plan_id: &str, kind: &str) -> AppResult<u32> {
+    let _index = state.lock_index()?;
     let connection = state.connection()?;
     let mut statement = connection.prepare(
         "SELECT i.id, i.asset_id, i.source_path, i.target_path, i.status, a.content_hash
@@ -539,6 +580,193 @@ pub fn move_duplicate_to_trash(state: &AppState, asset_id: i64, path: &str) -> A
     )?;
     sync_search_row(&connection, asset_id)?;
     Ok(())
+}
+
+struct AssetDeleteOutcome {
+    asset_id: i64,
+    removed_location_ids: Vec<i64>,
+    content_hash: String,
+}
+
+pub fn delete_assets(state: &AppState, asset_ids: &[i64]) -> AppResult<DeleteAssetsResult> {
+    let mut connection = state.connection()?;
+    delete_assets_with(
+        &mut connection,
+        asset_ids,
+        |path| {
+            trash::delete(path)
+                .map_err(|error| AppError::Message(format!("无法移入系统回收站：{error}")))
+        },
+        &state.thumbnail_dir,
+    )
+}
+
+fn delete_assets_with<F>(
+    connection: &mut rusqlite::Connection,
+    asset_ids: &[i64],
+    mut recycle: F,
+    thumbnail_dir: &Path,
+) -> AppResult<DeleteAssetsResult>
+where
+    F: FnMut(&Path) -> AppResult<()>,
+{
+    let mut unique_ids = asset_ids
+        .iter()
+        .copied()
+        .filter(|asset_id| *asset_id > 0)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    unique_ids.sort_unstable();
+
+    let mut result = DeleteAssetsResult {
+        requested: unique_ids.len() as u32,
+        ..DeleteAssetsResult::default()
+    };
+    if unique_ids.is_empty() {
+        return Ok(result);
+    }
+
+    let mut outcomes = Vec::new();
+    for asset_id in unique_ids {
+        let asset = connection
+            .query_row(
+                "SELECT content_hash FROM assets WHERE id = ?1",
+                params![asset_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(content_hash) = asset else {
+            result.failed_assets += 1;
+            continue;
+        };
+
+        let mut statement = connection.prepare(
+            "SELECT id, path, available FROM asset_locations WHERE asset_id = ?1 ORDER BY id",
+        )?;
+        let locations = statement
+            .query_map(params![asset_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let mut removed_location_ids = Vec::new();
+        for (location_id, location_path, available) in locations {
+            if !available {
+                removed_location_ids.push(location_id);
+                continue;
+            }
+            let path = Path::new(&location_path);
+            if !path.exists() {
+                removed_location_ids.push(location_id);
+                continue;
+            }
+            if hash_file(path).ok().as_deref() != Some(content_hash.as_str()) {
+                result.failed_files += 1;
+                continue;
+            }
+            match recycle(path) {
+                Ok(()) => {
+                    result.moved_files += 1;
+                    removed_location_ids.push(location_id);
+                }
+                Err(_) => result.failed_files += 1,
+            }
+        }
+        outcomes.push(AssetDeleteOutcome {
+            asset_id,
+            removed_location_ids,
+            content_hash,
+        });
+    }
+
+    let transaction = connection.transaction()?;
+    let mut deleted_caches = Vec::new();
+    for outcome in outcomes {
+        for location_id in outcome.removed_location_ids {
+            transaction.execute(
+                "DELETE FROM asset_locations WHERE id = ?1 AND asset_id = ?2",
+                params![location_id, outcome.asset_id],
+            )?;
+        }
+        let remaining: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM asset_locations WHERE asset_id = ?1",
+            params![outcome.asset_id],
+            |row| row.get(0),
+        )?;
+        if remaining == 0 {
+            transaction.execute(
+                "DELETE FROM asset_search WHERE asset_id = ?1",
+                params![outcome.asset_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM organize_plan_items WHERE asset_id = ?1",
+                params![outcome.asset_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM assets WHERE id = ?1",
+                params![outcome.asset_id],
+            )?;
+            result.deleted_assets += 1;
+            deleted_caches.push(outcome.content_hash);
+        } else {
+            sync_search_row(&transaction, outcome.asset_id)?;
+            result.failed_assets += 1;
+        }
+    }
+
+    transaction.execute(
+        "UPDATE activity SET reversible = 0
+         WHERE plan_id IN (
+             SELECT p.id FROM organize_plans p
+             WHERE NOT EXISTS (SELECT 1 FROM organize_plan_items i WHERE i.plan_id = p.id)
+         )",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM organize_plans
+         WHERE NOT EXISTS (
+             SELECT 1 FROM organize_plan_items WHERE organize_plan_items.plan_id = organize_plans.id
+         )",
+        [],
+    )?;
+    if result.deleted_assets > 0 || result.moved_files > 0 {
+        let failure_detail = if result.failed_assets > 0 {
+            format!(
+                "，{} 张图片因文件发生变化、被占用或无权限而保留",
+                result.failed_assets
+            )
+        } else {
+            String::new()
+        };
+        add_activity(
+            &transaction,
+            "delete",
+            &if result.deleted_assets > 0 {
+                format!("删除了 {} 张图片", result.deleted_assets)
+            } else {
+                format!("移入回收站 {} 个文件", result.moved_files)
+            },
+            &format!(
+                "已将 {} 个本地文件移入系统回收站{}",
+                result.moved_files, failure_detail
+            ),
+            false,
+            None,
+        )?;
+    }
+    transaction.commit()?;
+
+    for content_hash in deleted_caches {
+        let _ = fs::remove_file(thumbnail_dir.join(format!("{content_hash}-preview.webp")));
+        let _ = fs::remove_file(thumbnail_dir.join(format!("{content_hash}-grid.webp")));
+    }
+    Ok(result)
 }
 
 fn safe_move(source: &Path, target: &Path, expected_hash: &str) -> AppResult<()> {
@@ -688,6 +916,100 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
 
+    fn test_connection(path: &Path) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open(path).expect("database");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys");
+        crate::db::migrate(&connection, path, false).expect("migration");
+        connection
+    }
+
+    fn insert_test_asset(
+        connection: &rusqlite::Connection,
+        content_hash: &str,
+        thumbnail_path: Option<&Path>,
+        paths: &[&Path],
+    ) -> i64 {
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    content_hash, filename, width, height, captured_at, imported_at,
+                    file_size, category, thumbnail_path
+                 ) VALUES (?1, 'test.jpg', 1200, 800, ?2, ?2, 12, 'camera', ?3)",
+                params![
+                    content_hash,
+                    Utc::now().to_rfc3339(),
+                    thumbnail_path.map(|path| path.to_string_lossy().to_string()),
+                ],
+            )
+            .expect("asset");
+        let asset_id = connection.last_insert_rowid();
+        for path in paths {
+            connection
+                .execute(
+                    "INSERT INTO asset_locations(
+                        asset_id, path, source, available, needs_organize,
+                        last_seen_at, file_size, modified_at
+                     ) VALUES (?1, ?2, '测试', 1, 1, ?3, 12, 1)",
+                    params![
+                        asset_id,
+                        path.to_string_lossy().to_string(),
+                        Utc::now().to_rfc3339(),
+                    ],
+                )
+                .expect("location");
+        }
+        sync_search_row(connection, asset_id).expect("search row");
+        asset_id
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copies_only_existing_archived_outputs_of_the_requested_job() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let connection = test_connection(&directory.path().join("picnest.db"));
+        connection
+            .execute(
+                "INSERT INTO organize_plans(id, status, total_bytes, created_at)
+                 VALUES ('copy-job', 'partial', 12, ?1), ('other-job', 'completed', 12, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .expect("plans");
+
+        for (filename, job_id, status, exists) in [
+            ("成功.jpg", "copy-job", "moved", true),
+            ("failed.jpg", "copy-job", "failed", true),
+            ("missing.jpg", "copy-job", "moved", false),
+            ("other.jpg", "other-job", "moved", true),
+        ] {
+            let path = directory.path().join(filename);
+            if exists {
+                fs::write(&path, b"photo").expect("photo file");
+            }
+            let asset_id = insert_test_asset(&connection, filename, None, &[&path]);
+            connection
+                .execute(
+                    "UPDATE asset_locations SET needs_organize = 0 WHERE asset_id = ?1",
+                    params![asset_id],
+                )
+                .expect("organized location");
+            connection
+                .execute(
+                    "INSERT INTO organize_plan_items(
+                        plan_id, asset_id, source_path, target_path, reason, bytes, status
+                     ) VALUES (?1, ?2, 'source.jpg', ?3, '测试', 12, ?4)",
+                    params![job_id, asset_id, path.to_string_lossy(), status],
+                )
+                .expect("plan item");
+        }
+
+        assert_eq!(
+            organized_file_paths(&connection, "copy-job").expect("copy paths"),
+            vec![directory.path().join("成功.jpg")],
+        );
+    }
+
     #[test]
     fn sanitizes_windows_reserved_characters() {
         assert_eq!(sanitize_filename("trip:day/one?.jpg"), "trip_day_one_.jpg");
@@ -754,5 +1076,174 @@ mod tests {
         assert_eq!(first, base);
         assert_ne!(first, second);
         assert!(second.to_string_lossy().contains("abcdef01"));
+    }
+
+    #[test]
+    fn deleting_assets_recycles_every_copy_and_cleans_indexes() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let db_path = directory.path().join("picnest.db");
+        let thumbnail_dir = directory.path().join("thumbnails");
+        fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        let mut connection = test_connection(&db_path);
+        let first = directory.path().join("first.jpg");
+        let second = directory.path().join("second.jpg");
+        fs::write(&first, b"same-photo").expect("first photo");
+        fs::write(&second, b"same-photo").expect("second photo");
+        let content_hash = hash_file(&first).expect("content hash");
+        let grid = thumbnail_dir.join(format!("{content_hash}-grid.webp"));
+        let preview = thumbnail_dir.join(format!("{content_hash}-preview.webp"));
+        fs::write(&grid, b"grid").expect("grid thumbnail");
+        fs::write(&preview, b"preview").expect("preview thumbnail");
+        let asset_id = insert_test_asset(
+            &connection,
+            &content_hash,
+            Some(&grid),
+            &[first.as_path(), second.as_path()],
+        );
+        connection
+            .execute(
+                "INSERT INTO albums(name, kind, created_at) VALUES ('测试相册', 'manual', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .expect("album");
+        let album_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO album_assets(album_id, asset_id) VALUES (?1, ?2)",
+                params![album_id, asset_id],
+            )
+            .expect("album asset");
+        connection
+            .execute(
+                "INSERT INTO organize_plans(id, status, total_bytes, created_at)
+                 VALUES ('delete-plan', 'planned', 12, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .expect("plan");
+        connection
+            .execute(
+                "INSERT INTO organize_plan_items(
+                    plan_id, asset_id, source_path, target_path, reason, bytes, conflict
+                 ) VALUES ('delete-plan', ?1, ?2, ?3, '测试', 12, 0)",
+                params![
+                    asset_id,
+                    first.to_string_lossy().to_string(),
+                    directory
+                        .path()
+                        .join("archive.jpg")
+                        .to_string_lossy()
+                        .to_string(),
+                ],
+            )
+            .expect("plan item");
+
+        let result = delete_assets_with(
+            &mut connection,
+            &[asset_id, asset_id],
+            |path| {
+                fs::remove_file(path)?;
+                Ok(())
+            },
+            &thumbnail_dir,
+        )
+        .expect("delete assets");
+
+        assert_eq!(result.requested, 1);
+        assert_eq!(result.deleted_assets, 1);
+        assert_eq!(result.moved_files, 2);
+        assert_eq!(result.failed_assets, 0);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert!(!grid.exists());
+        assert!(!preview.exists());
+        for table in [
+            "assets",
+            "asset_locations",
+            "asset_search",
+            "album_assets",
+            "organize_plan_items",
+            "organize_plans",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("table count");
+            assert_eq!(count, 0, "{table} should be empty");
+        }
+        let delete_activity: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM activity WHERE kind = 'delete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("activity");
+        assert_eq!(delete_activity, 1);
+    }
+
+    #[test]
+    fn deleting_assets_keeps_failed_files_and_their_index() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let db_path = directory.path().join("picnest.db");
+        let thumbnail_dir = directory.path().join("thumbnails");
+        fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        let mut connection = test_connection(&db_path);
+        let removed = directory.path().join("removed.jpg");
+        let locked = directory.path().join("locked.jpg");
+        fs::write(&removed, b"same-photo").expect("removable photo");
+        fs::write(&locked, b"same-photo").expect("locked photo");
+        let content_hash = hash_file(&removed).expect("content hash");
+        let asset_id = insert_test_asset(
+            &connection,
+            &content_hash,
+            None,
+            &[removed.as_path(), locked.as_path()],
+        );
+
+        let result = delete_assets_with(
+            &mut connection,
+            &[asset_id],
+            |path| {
+                if path.ends_with("locked.jpg") {
+                    return Err(AppError::Message("文件被占用".to_string()));
+                }
+                fs::remove_file(path)?;
+                Ok(())
+            },
+            &thumbnail_dir,
+        )
+        .expect("partial delete");
+
+        assert_eq!(result.deleted_assets, 0);
+        assert_eq!(result.moved_files, 1);
+        assert_eq!(result.failed_files, 1);
+        assert_eq!(result.failed_assets, 1);
+        assert!(!removed.exists());
+        assert!(locked.exists());
+        let asset_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE id = ?1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .expect("asset count");
+        assert_eq!(asset_count, 1);
+        let locations = connection
+            .prepare("SELECT path FROM asset_locations WHERE asset_id = ?1")
+            .expect("locations statement")
+            .query_map(params![asset_id], |row| row.get::<_, String>(0))
+            .expect("locations")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("location list");
+        assert_eq!(locations, vec![locked.to_string_lossy().to_string()]);
+        let indexed_path: String = connection
+            .query_row(
+                "SELECT path FROM asset_search WHERE asset_id = ?1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .expect("search path");
+        assert!(indexed_path.contains("locked.jpg"));
+        assert!(!indexed_path.contains("removed.jpg"));
     }
 }

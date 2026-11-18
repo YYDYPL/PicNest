@@ -42,6 +42,7 @@ pub fn scan_paths(state: &AppState, paths: &[String]) -> AppResult<ScanResult> {
     }
     state.scan_cancelled.store(false, Ordering::SeqCst);
     let _guard = ScanGuard(&state.scan_running);
+    let _index = state.lock_index()?;
     let connection = state.connection()?;
     let settings = load_settings(&connection)?;
     let mut result = ScanResult::default();
@@ -441,6 +442,7 @@ fn mark_missing_path(connection: &rusqlite::Connection, missing_path: &Path) -> 
 }
 
 pub fn process_watcher_paths(state: &AppState, paths: &[PathBuf]) -> AppResult<()> {
+    let _index = state.lock_index()?;
     let connection = state.connection()?;
     let settings = load_settings(&connection)?;
     let rules = source_rules(&settings);
@@ -457,17 +459,19 @@ pub fn process_watcher_paths(state: &AppState, paths: &[PathBuf]) -> AppResult<(
             continue;
         }
         if path.is_dir() {
-            if let Some(rule) = rules
+            let recursive = rules
                 .iter()
-                .find(|rule| path_in_scope(path, Path::new(&rule.path), rule.recursive))
-            {
-                if rule.recursive {
-                    for entry in source_walker(path, true)
-                        .filter_map(Result::ok)
-                        .filter(|entry| entry.file_type().is_file())
-                    {
-                        candidates.insert(entry.into_path());
-                    }
+                .any(|rule| rule.recursive && path_in_scope(path, Path::new(&rule.path), true));
+            let is_source_root = rules.iter().any(|rule| {
+                let root = Path::new(&rule.path);
+                path_starts_with(path, root) && path_starts_with(root, path)
+            });
+            if recursive || is_source_root {
+                for entry in source_walker(path, recursive)
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_file())
+                {
+                    candidates.insert(entry.into_path());
                 }
             }
         } else {
@@ -939,6 +943,23 @@ fn fts_query(search: &str) -> Option<String> {
         .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
     (!terms.is_empty()).then(|| terms.join(" AND "))
+}
+
+#[cfg(windows)]
+pub fn asset_file_for_copy(state: &AppState, asset_id: i64) -> AppResult<PathBuf> {
+    let connection = state.connection()?;
+    let mut statement = connection.prepare(
+        "SELECT path FROM asset_locations WHERE asset_id = ?1 AND available = 1
+         ORDER BY needs_organize, id",
+    )?;
+    let paths = statement.query_map(params![asset_id], |row| row.get::<_, String>(0))?;
+    for path in paths {
+        let path = PathBuf::from(path?);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(AppError::Message("图片文件已无法访问".to_string()))
 }
 
 pub fn asset_image_data_url(

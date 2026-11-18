@@ -251,6 +251,16 @@ pub struct RemoveSourceResult {
     pub removed_indexes: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAssetsResult {
+    pub requested: u32,
+    pub deleted_assets: u32,
+    pub moved_files: u32,
+    pub failed_assets: u32,
+    pub failed_files: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetLocation {

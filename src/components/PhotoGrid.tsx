@@ -98,6 +98,8 @@ export function PhotoGrid(props: PhotoGridProps) {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
+    getItemKey: (index) => rows[index]?.key ?? index,
+    measureElement: (element) => Math.ceil(element.getBoundingClientRect().height),
     estimateSize: (index) => rows[index]?.kind === 'heading' ? 55 : photoRowHeight,
     overscan: 5,
   })
@@ -107,6 +109,10 @@ export function PhotoGrid(props: PhotoGridProps) {
   useEffect(() => {
     if (hasMore && !loadingMore && lastVirtualIndex >= rows.length - 3) onLoadMore()
   }, [hasMore, lastVirtualIndex, loadingMore, onLoadMore, rows.length])
+
+  useEffect(() => {
+    virtualizer.measure()
+  }, [columns, virtualizer])
 
   if (!props.assets.length) {
     return (
@@ -127,8 +133,10 @@ export function PhotoGrid(props: PhotoGridProps) {
           return (
             <div
               key={row.key}
+              ref={virtualizer.measureElement}
+              data-index={virtualRow.index}
               className={row.kind === 'heading' ? 'timeline-heading-row' : 'photo-grid-row'}
-              style={{ transform: `translateY(${virtualRow.start}px)`, height: virtualRow.size }}
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
             >
               {row.kind === 'heading' ? (
                 <>

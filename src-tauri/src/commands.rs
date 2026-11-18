@@ -15,8 +15,9 @@ use crate::{
     library,
     models::{
         AiAnalysis, AiConnectionInput, AppSettings, AssetLocation, AssetPage, AssetQuery,
-        BootstrapPayload, ConnectionTestResult, DiagnosticsResult, OrganizePlan, OrganizeResult,
-        RemoveSourcePreview, RemoveSourceResult, SaveSettingsInput, ScanResult,
+        BootstrapPayload, ConnectionTestResult, DeleteAssetsResult, DiagnosticsResult,
+        OrganizePlan, OrganizeResult, RemoveSourcePreview, RemoveSourceResult, SaveSettingsInput,
+        ScanResult,
     },
     ocr, organize, sources,
 };
@@ -123,6 +124,38 @@ pub async fn apply_organize_plan(
 ) -> Result<OrganizeResult, String> {
     let state = state.inner().clone();
     blocking(move || organize::apply_plan(&state, &plan_id)).await
+}
+
+#[tauri::command]
+pub async fn copy_organized_files(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    plan_id: String,
+) -> Result<usize, String> {
+    let state = state.inner().clone();
+    blocking(move || organize::copy_organized_files(&state, &window, &plan_id)).await
+}
+
+#[tauri::command]
+pub async fn copy_asset_file(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    asset_id: i64,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let state = state.inner().clone();
+        blocking(move || {
+            let path = library::asset_file_for_copy(&state, asset_id)?;
+            crate::clipboard::copy_files(&window, &[path])
+        })
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (state, window, asset_id);
+        Err("复制图片文件需要 Windows 桌面版".to_string())
+    }
 }
 
 #[tauri::command]
@@ -382,6 +415,15 @@ pub async fn move_duplicate_to_trash(
 ) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || organize::move_duplicate_to_trash(&state, asset_id, &path)).await
+}
+
+#[tauri::command]
+pub async fn delete_assets(
+    state: State<'_, AppState>,
+    asset_ids: Vec<i64>,
+) -> Result<DeleteAssetsResult, String> {
+    let state = state.inner().clone();
+    blocking(move || organize::delete_assets(&state, &asset_ids)).await
 }
 
 #[tauri::command]

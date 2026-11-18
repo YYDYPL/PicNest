@@ -3,10 +3,12 @@ import {
   FolderPlus,
   PanelRightClose,
   PanelRightOpen,
+  RefreshCw,
   RotateCcw,
   Search,
   Sparkles,
   Tags,
+  Trash2,
   X,
 } from 'lucide-react'
 
@@ -18,11 +20,14 @@ interface TopbarProps {
   inspectorOpen: boolean
   canUndo: boolean
   busy: boolean
+  hasSources: boolean
   onSearch: (value: string) => void
   onAddSource: () => void
+  onRescan: () => void
   onOrganize: () => void
   onAddToAlbum: () => void
   onEditTags: () => void
+  onDelete: () => void
   onUndo: () => void
   onClearSelection: () => void
   onToggleInspector: () => void
@@ -55,6 +60,7 @@ export function Topbar(props: TopbarProps) {
           </button>
           <IconButton label="加入相册" onClick={props.onAddToAlbum} disabled={props.busy}><FolderPlus size={18} /></IconButton>
           <IconButton label="编辑标签" onClick={props.onEditTags} disabled={props.busy}><Tags size={18} /></IconButton>
+          <IconButton label="移入回收站" onClick={props.onDelete} disabled={props.busy}><Trash2 size={18} /></IconButton>
         </div>
       ) : (
         <div className="view-heading">
@@ -76,6 +82,7 @@ export function Topbar(props: TopbarProps) {
 
       <div className="topbar-actions">
         <IconButton label="撤销上次整理" onClick={props.onUndo} disabled={!props.canUndo || props.busy}><RotateCcw size={18} /></IconButton>
+        <IconButton label="重新扫描监控文件夹" onClick={props.onRescan} disabled={!props.hasSources || props.busy}><RefreshCw size={17} /></IconButton>
         <button className="secondary-button compact" type="button" onClick={props.onAddSource} disabled={props.busy}>
           <FolderPlus size={16} aria-hidden="true" />
           添加文件夹
